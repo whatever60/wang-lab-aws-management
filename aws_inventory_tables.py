@@ -1,0 +1,428 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+HOURS_PER_MONTH = 730
+PRICING_CACHE_TTL_SECONDS = 24 * 60 * 60
+
+
+def run_aws_json(args: List[str], region: Optional[str]) -> Dict[str, Any]:
+    cmd = ["aws"] + args + ["--output", "json"]
+    if region:
+        cmd.extend(["--region", region])
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"AWS CLI command failed: {' '.join(cmd)}\n{proc.stderr.strip()}"
+        )
+    return json.loads(proc.stdout or "{}")
+
+
+def detect_default_region() -> Optional[str]:
+    proc = subprocess.run(
+        ["aws", "configure", "get", "region"], capture_output=True, text=True
+    )
+    region = (proc.stdout or "").strip()
+    return region if region else None
+
+
+def pricing_cache_path(region: str) -> Path:
+    return Path(".cache") / "aws-pricing" / f"{region}.json"
+
+
+def load_cached_pricing(region: str, max_age_seconds: int) -> Optional[Dict[str, Any]]:
+    path = pricing_cache_path(region)
+    if not path.exists():
+        return None
+    age = time.time() - path.stat().st_mtime
+    if age > max_age_seconds:
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def save_cached_pricing(region: str, data: Dict[str, Any]) -> None:
+    path = pricing_cache_path(region)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def fetch_json(url: str) -> Dict[str, Any]:
+    with urllib.request.urlopen(url) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def usd_from_term(term: Dict[str, Any]) -> Optional[float]:
+    for dim in term.get("priceDimensions", {}).values():
+        if dim.get("unit") in {"Hrs", "GB-Mo"}:
+            usd = dim.get("pricePerUnit", {}).get("USD")
+            if usd is not None and usd != "":
+                try:
+                    return float(usd)
+                except ValueError:
+                    return None
+    return None
+
+
+def parse_pricing(region_code: str, region_data: Dict[str, Any]) -> Dict[str, Any]:
+    products = region_data.get("products", {})
+    terms = region_data.get("terms", {}).get("OnDemand", {})
+    instance_hourly: Dict[str, float] = {}
+    storage_monthly_per_gb: Dict[str, float] = {}
+
+    for sku, product in products.items():
+        attrs = product.get("attributes", {})
+        if attrs.get("regionCode") != region_code:
+            continue
+
+        product_family = product.get("productFamily")
+        sku_terms = terms.get(sku, {})
+        if not sku_terms:
+            continue
+        term = next(iter(sku_terms.values()), None)
+        if not term:
+            continue
+        price = usd_from_term(term)
+        if price is None:
+            continue
+
+        if product_family == "Compute Instance":
+            if attrs.get("operatingSystem") != "Linux":
+                continue
+            if attrs.get("tenancy") != "Shared":
+                continue
+            if attrs.get("preInstalledSw") not in {"NA", None, ""}:
+                continue
+            instance_type = attrs.get("instanceType")
+            if instance_type and instance_type not in instance_hourly:
+                instance_hourly[instance_type] = price
+        elif product_family == "Storage":
+            volume_api_name = attrs.get("volumeApiName")
+            if volume_api_name and volume_api_name not in storage_monthly_per_gb:
+                storage_monthly_per_gb[volume_api_name] = price
+
+    return {
+        "instance_hourly": instance_hourly,
+        "storage_monthly_per_gb": storage_monthly_per_gb,
+    }
+
+
+def fetch_pricing_for_region(region: str, no_cache: bool = False) -> Dict[str, Any]:
+    if not no_cache:
+        cached = load_cached_pricing(region, PRICING_CACHE_TTL_SECONDS)
+        if cached is not None:
+            return cached
+
+    region_index_url = (
+        "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/region_index.json"
+    )
+    region_index = fetch_json(region_index_url)
+    region_entry = region_index.get("regions", {}).get(region)
+    if not region_entry:
+        raise RuntimeError(f"Region {region} not found in AWS public pricing index.")
+    relative_url = region_entry.get("currentVersionUrl")
+    if not relative_url:
+        raise RuntimeError(f"Region {region} has no pricing data URL.")
+
+    region_url = f"https://pricing.us-east-1.amazonaws.com{relative_url}"
+    region_data = fetch_json(region_url)
+    parsed = parse_pricing(region, region_data)
+    save_cached_pricing(region, parsed)
+    return parsed
+
+
+def fmt_money(amount: Optional[float]) -> str:
+    if amount is None:
+        return ""
+    return f"{amount:.5f}"
+
+
+def print_rows(rows: List[Dict[str, Any]], columns: List[Tuple[str, str]], fmt: str) -> None:
+    if fmt == "json":
+        print(json.dumps(rows, indent=2))
+        return
+
+    if fmt == "csv":
+        header = ",".join(col[0] for col in columns)
+        print(header)
+        for row in rows:
+            cells = [str(row.get(key, "")) for key, _ in columns]
+            print(",".join(cells))
+        return
+
+    widths = []
+    for key, title in columns:
+        width = len(title)
+        for row in rows:
+            width = max(width, len(str(row.get(key, ""))))
+        widths.append(width)
+
+    header = " | ".join(
+        title.ljust(widths[i]) for i, (_, title) in enumerate(columns)
+    )
+    divider = "-+-".join("-" * w for w in widths)
+    print(header)
+    print(divider)
+    for row in rows:
+        line = " | ".join(
+            str(row.get(key, "")).ljust(widths[i]) for i, (key, _) in enumerate(columns)
+        )
+        print(line)
+
+
+def build_instance_volume_rows(
+    region: str, pricing: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    instances = run_aws_json(["ec2", "describe-instances"], region).get("Reservations", [])
+    volumes = run_aws_json(["ec2", "describe-volumes"], region).get("Volumes", [])
+
+    instance_by_id: Dict[str, Dict[str, Any]] = {}
+    for reservation in instances:
+        for instance in reservation.get("Instances", []):
+            instance_by_id[instance["InstanceId"]] = instance
+
+    instance_hourly = pricing.get("instance_hourly", {})
+    storage_monthly_per_gb = pricing.get("storage_monthly_per_gb", {})
+
+    rows: List[Dict[str, Any]] = []
+    matched_instance_ids = set()
+
+    for volume in volumes:
+        attachments = volume.get("Attachments", [])
+        if attachments:
+            for attachment in attachments:
+                iid = attachment.get("InstanceId", "")
+                inst = instance_by_id.get(iid, {})
+                matched_instance_ids.add(iid)
+                instance_type = inst.get("InstanceType", "")
+                instance_price_hour = instance_hourly.get(instance_type)
+                volume_type = volume.get("VolumeType", "")
+                vol_price_gb = storage_monthly_per_gb.get(volume_type)
+                volume_size = volume.get("Size", 0)
+                rows.append(
+                    {
+                        "key_name": inst.get("KeyName", ""),
+                        "instance_id": iid,
+                        "instance_type": instance_type,
+                        "instance_state": (inst.get("State") or {}).get("Name", ""),
+                        "volume_id": volume.get("VolumeId", ""),
+                        "device": attachment.get("Device", ""),
+                        "volume_type": volume_type,
+                        "volume_size_gib": volume_size,
+                        "ec2_price_per_hour_usd": fmt_money(instance_price_hour),
+                        "ec2_price_per_month_usd": fmt_money(
+                            instance_price_hour * HOURS_PER_MONTH
+                            if instance_price_hour is not None
+                            else None
+                        ),
+                        "storage_price_per_month_usd": fmt_money(
+                            vol_price_gb * volume_size if vol_price_gb is not None else None
+                        ),
+                    }
+                )
+        else:
+            volume_type = volume.get("VolumeType", "")
+            vol_price_gb = storage_monthly_per_gb.get(volume_type)
+            volume_size = volume.get("Size", 0)
+            rows.append(
+                {
+                    "key_name": "",
+                    "instance_id": "",
+                    "instance_type": "",
+                    "instance_state": "",
+                    "volume_id": volume.get("VolumeId", ""),
+                    "device": "",
+                    "volume_type": volume_type,
+                    "volume_size_gib": volume_size,
+                    "ec2_price_per_hour_usd": "",
+                    "ec2_price_per_month_usd": "",
+                    "storage_price_per_month_usd": fmt_money(
+                        vol_price_gb * volume_size if vol_price_gb is not None else None
+                    ),
+                }
+            )
+
+    for iid, inst in instance_by_id.items():
+        if iid in matched_instance_ids:
+            continue
+        instance_type = inst.get("InstanceType", "")
+        instance_price_hour = instance_hourly.get(instance_type)
+        rows.append(
+            {
+                "key_name": inst.get("KeyName", ""),
+                "instance_id": iid,
+                "instance_type": instance_type,
+                "instance_state": (inst.get("State") or {}).get("Name", ""),
+                "volume_id": "",
+                "device": "",
+                "volume_type": "",
+                "volume_size_gib": "",
+                "ec2_price_per_hour_usd": fmt_money(instance_price_hour),
+                "ec2_price_per_month_usd": fmt_money(
+                    instance_price_hour * HOURS_PER_MONTH
+                    if instance_price_hour is not None
+                    else None
+                ),
+                "storage_price_per_month_usd": "",
+            }
+        )
+
+    rows.sort(
+        key=lambda row: (
+            str(row.get("key_name", "")),
+            float(row["ec2_price_per_hour_usd"]) if row["ec2_price_per_hour_usd"] else float("inf"),
+        )
+    )
+    return rows
+
+
+def build_snapshot_rows(region: str) -> List[Dict[str, Any]]:
+    volumes = run_aws_json(["ec2", "describe-volumes"], region).get("Volumes", [])
+    snapshots = run_aws_json(["ec2", "describe-snapshots", "--owner-ids", "self"], region).get(
+        "Snapshots", []
+    )
+    images = run_aws_json(["ec2", "describe-images", "--owners", "self"], region).get(
+        "Images", []
+    )
+
+    volume_by_id = {v["VolumeId"]: v for v in volumes}
+    ami_refs: Dict[str, List[str]] = {}
+    for image in images:
+        image_id = image.get("ImageId", "")
+        for mapping in image.get("BlockDeviceMappings", []):
+            ebs = mapping.get("Ebs") or {}
+            snapshot_id = ebs.get("SnapshotId")
+            if snapshot_id:
+                ami_refs.setdefault(snapshot_id, []).append(image_id)
+
+    rows: List[Dict[str, Any]] = []
+    for snap in snapshots:
+        snapshot_id = snap.get("SnapshotId", "")
+        volume_id = snap.get("VolumeId", "")
+        volume = volume_by_id.get(volume_id)
+        attachments = (volume or {}).get("Attachments", [])
+        attached_instance_ids = sorted(
+            {att.get("InstanceId", "") for att in attachments if att.get("InstanceId")}
+        )
+        ami_ids = sorted(set(ami_refs.get(snapshot_id, [])))
+
+        status_parts = []
+        if attached_instance_ids:
+            status_parts.append("ATTACHED_VOLUME")
+        if ami_ids:
+            status_parts.append("USED_BY_AMI")
+        if volume and not attached_instance_ids:
+            status_parts.append("EXISTING_VOLUME")
+        if not status_parts:
+            status_parts.append("DANGLING")
+
+        rows.append(
+            {
+                "snapshot_id": snapshot_id,
+                "size_gib": snap.get("VolumeSize", ""),
+                "volume_id": volume_id,
+                "volume_exists": bool(volume),
+                "attached_instance_ids": ";".join(attached_instance_ids),
+                "ami_ids": ";".join(ami_ids),
+                "start_time": snap.get("StartTime", ""),
+                "description": (snap.get("Description", "") or "").replace("\n", " "),
+                "status": ",".join(status_parts),
+            }
+        )
+
+    rows.sort(key=lambda row: int(row.get("size_gib") or 0), reverse=True)
+    return rows
+
+
+def get_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Build joined EC2/EBS tables for cost and snapshot audit analysis."
+    )
+    parser.add_argument(
+        "--region",
+        default=detect_default_region(),
+        help="AWS region. Defaults to configured aws CLI region.",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["table", "csv", "json"],
+        default="table",
+        help="Output format.",
+    )
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    c1 = sub.add_parser("instance-volume-table", help="Generate instance/volume/cost table.")
+    c1.add_argument(
+        "--no-price-cache",
+        action="store_true",
+        help="Always refresh pricing from AWS pricing endpoint.",
+    )
+
+    sub.add_parser(
+        "snapshot-audit-table",
+        help="Generate snapshot table joined with volumes and AMIs to find dangling snapshots.",
+    )
+    return parser
+
+
+def main() -> int:
+    parser = get_parser()
+    args = parser.parse_args()
+
+    if not args.region:
+        print(
+            "No AWS region found. Set --region or configure one via `aws configure`.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.command == "instance-volume-table":
+        pricing = fetch_pricing_for_region(args.region, no_cache=args.no_price_cache)
+        rows = build_instance_volume_rows(args.region, pricing)
+        columns = [
+            ("key_name", "key_name"),
+            ("instance_id", "instance_id"),
+            ("instance_type", "instance_type"),
+            ("instance_state", "instance_state"),
+            ("volume_id", "volume_id"),
+            ("device", "device"),
+            ("volume_type", "volume_type"),
+            ("volume_size_gib", "volume_size_gib"),
+            ("ec2_price_per_hour_usd", "ec2_price_per_hour_usd"),
+            ("ec2_price_per_month_usd", "ec2_price_per_month_usd"),
+            ("storage_price_per_month_usd", "storage_price_per_month_usd"),
+        ]
+        print_rows(rows, columns, args.format)
+        return 0
+
+    if args.command == "snapshot-audit-table":
+        rows = build_snapshot_rows(args.region)
+        columns = [
+            ("snapshot_id", "snapshot_id"),
+            ("size_gib", "size_gib"),
+            ("volume_id", "volume_id"),
+            ("volume_exists", "volume_exists"),
+            ("attached_instance_ids", "attached_instance_ids"),
+            ("ami_ids", "ami_ids"),
+            ("start_time", "start_time"),
+            ("status", "status"),
+            ("description", "description"),
+        ]
+        print_rows(rows, columns, args.format)
+        return 0
+
+    parser.print_help()
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
