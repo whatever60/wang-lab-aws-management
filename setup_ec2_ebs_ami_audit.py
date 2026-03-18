@@ -305,6 +305,7 @@ def build_slack_input_transformer() -> dict[str, Any]:
         "event_name": "$.detail.eventName",
         "event_source": "$.detail.eventSource",
         "actor_arn": "$.detail.userIdentity.arn",
+        "key_name": "$.detail.requestParameters.keyName",
         "instance_type": "$.detail.requestParameters.instanceType",
         "volume_size_gib_req": "$.detail.requestParameters.size",
         "volume_size_gib_resp": "$.detail.responseElements.size",
@@ -328,6 +329,7 @@ def build_slack_input_transformer() -> dict[str, Any]:
                 "*Region:* `<region>`\n"
                 "*Time:* `<event_time>`\n"
                 "*Actor:* `<actor_arn>`\n"
+                "*EC2 Key Name:* `<key_name>`\n"
                 "*Instance Type:* `<instance_type>`\n"
                 "*Volume Size GiB (req/resp):* `<volume_size_gib_req>` / `<volume_size_gib_resp>`\n"
                 "*Volume Type (req/resp):* `<volume_type_req>` / `<volume_type_resp>`\n"
@@ -346,6 +348,7 @@ def build_slack_input_transformer() -> dict[str, Any]:
                 "region": "<region>",
                 "eventTime": "<event_time>",
                 "actorArn": "<actor_arn>",
+                "keyName": "<key_name>",
                 "instanceType": "<instance_type>",
                 "volumeSizeGiBRequest": "<volume_size_gib_req>",
                 "volumeSizeGiBResponse": "<volume_size_gib_resp>",

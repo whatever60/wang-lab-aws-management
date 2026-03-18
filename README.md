@@ -143,6 +143,7 @@ Messages are custom-formatted (not raw JSON). In general, each message has:
 - Description includes region
 - Description includes event time
 - Description includes actor ARN (who/what made the API call)
+- Description includes EC2 key name (when present in event payload, typically `RunInstances`)
 - Description includes instance type (when present in event payload)
 - Description includes volume size in GiB (when present in event payload)
 - Description includes volume type such as `gp3`/`gp2` (when present in event payload)
@@ -159,11 +160,20 @@ Practically, this means:
 - Account-level management API activity across enabled regions is logged to S3.
 - This includes console, CLI, and SDK/API management actions.
 - We did not configure data-event selectors here, so this setup focuses on management events.
+- Management events are control-plane API actions on AWS resources (for example `RunInstances`, `CreateVolume`, `DeleteSnapshot`, `DeregisterImage`).
+- Data events are data-plane/object-level operations (for example S3 object read/write) and are only logged when explicitly selected via data-event selectors.
+
+CloudTrail log file validation artifacts in your bucket:
+
+- Event log files: `s3://my-787744166714-cloudtrail-audit/AWSLogs/787744166714/CloudTrail/<region>/YYYY/MM/DD/*.json.gz`
+- Digest files used for integrity verification: `s3://my-787744166714-cloudtrail-audit/AWSLogs/787744166714/CloudTrail-Digest/<region>/YYYY/MM/DD/*.json.gz`
+- Validation command example: `aws cloudtrail validate-logs --trail-arn arn:aws:cloudtrail:us-east-1:787744166714:trail/account-audit-trail --start-time 2026-03-18T00:00:00Z --region us-east-1`
 
 ### 4) What EventBridge is doing
 
 EventBridge provides near-real-time filtering and routing:
 
+- CloudTrail records many management events; this rule selects only a subset using `source`, `detail-type`, `detail.eventSource`, and `detail.eventName` matching.
 - It listens for CloudTrail-backed EC2 API call events that match the event list above.
 - It forwards matched events to regional SNS topics (`asset-audit-events`).
 - In Slack mode, it applies an input transformer so SNS payloads are in Amazon Q custom notification schema.
@@ -175,7 +185,19 @@ AWS Config is set up per enabled region to track resource configuration history 
 - `AWS::EC2::Instance`
 - `AWS::EC2::Volume`
 
-It creates/uses recorder `default`, delivery channel `default`, and writes Config snapshots/history to the configured S3 bucket.
+A delivery channel is the AWS Config output route. In this setup, delivery channel `default` delivers Config files to S3 bucket `my-787744166714-config-history` (no SNS topic configured).
+
+Specific Config artifacts delivered:
+
+- Configuration history files (change history): `.../Config/<region>/YYYY/M/D/ConfigHistory/*.json.gz`
+- Configuration snapshot files (point-in-time inventory): `.../Config/<region>/YYYY/M/D/ConfigSnapshot/*.json.gz`
+- Current status check command: `aws configservice describe-delivery-channel-status --region us-east-1`
+- A snapshot is not just a copy of history files; it is a full point-in-time inventory, while history files are incremental change batches.
+
+Important note for this account:
+
+- The recorder is currently configured for `AWS::EC2::Instance` and `AWS::EC2::Volume`.
+- Your bucket already contains broader historical Config data from prior recording periods/settings, so snapshots/history may still include other resource types.
 
 Run only one module:
 
