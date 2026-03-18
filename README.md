@@ -12,8 +12,15 @@ Pricing is fetched from the AWS public pricing endpoint and cached for 24 hours 
 ## Requirements
 
 - Python 3.9+
+- `uv`
 - AWS CLI installed and authenticated
 - Region configured in AWS CLI or passed with `--region`
+
+Install dependencies:
+
+```bash
+uv sync
+```
 
 ## Commands
 
@@ -21,6 +28,7 @@ Pricing is fetched from the AWS public pricing endpoint and cached for 24 hours 
 
 Outer join of instances and volumes based on attached instances, with:
 
+- resource `Name` tags (`instance_name`, `volume_name`)
 - EC2 on-demand price per hour
 - EC2 estimated monthly price (`hourly * 730`)
 - EBS storage monthly price (`size_gib * usd_per_gb_month`)
@@ -33,15 +41,16 @@ Sorted by:
 Run:
 
 ```bash
-python aws_inventory_tables.py instance-volume-table
+uv run python aws_inventory_tables.py instance-volume-table
 ```
 
 Useful options:
 
 ```bash
-python aws_inventory_tables.py --region us-east-1 instance-volume-table
-python aws_inventory_tables.py --format csv instance-volume-table
-python aws_inventory_tables.py instance-volume-table --no-price-cache
+uv run python aws_inventory_tables.py --region us-east-1 instance-volume-table
+uv run python aws_inventory_tables.py --format csv instance-volume-table
+uv run python aws_inventory_tables.py instance-volume-table --no-price-cache
+uv run python aws_inventory_tables.py instance-volume-table --output outputs/instance_volume_table.xlsx
 ```
 
 ### 2) Snapshot audit table
@@ -51,9 +60,11 @@ Outer join across snapshots, volumes, and AMIs to highlight potentially dangling
 Each row includes:
 
 - snapshot metadata
+- resource `Name` tags (`snapshot_name`, `volume_name`)
+- snapshot storage class (`standard` or `archive`)
 - whether the source volume still exists
 - attached instance IDs (if source volume is attached)
-- AMIs that reference the snapshot
+- AMIs that reference the snapshot (`ami_ids`) and their names (`ami_names`)
 - status tags such as `ATTACHED_VOLUME`, `USED_BY_AMI`, `EXISTING_VOLUME`, `DANGLING`
 
 Sorted by snapshot size descending.
@@ -61,12 +72,20 @@ Sorted by snapshot size descending.
 Run:
 
 ```bash
-python aws_inventory_tables.py snapshot-audit-table
+uv run python aws_inventory_tables.py snapshot-audit-table
 ```
 
 Useful options:
 
 ```bash
-python aws_inventory_tables.py --region us-east-1 snapshot-audit-table
-python aws_inventory_tables.py --format json snapshot-audit-table
+uv run python aws_inventory_tables.py --region us-east-1 snapshot-audit-table
+uv run python aws_inventory_tables.py --format json snapshot-audit-table
+uv run python aws_inventory_tables.py snapshot-audit-table --output outputs/snapshot_audit_table.xlsx
 ```
+
+`--output` auto-detects format from file extension:
+
+- `.csv`
+- `.json`
+- `.xlsx`
+- `.txt` / `.table`

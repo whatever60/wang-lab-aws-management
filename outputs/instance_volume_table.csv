@@ -1,0 +1,21 @@
+key_name,instance_name,instance_id,instance_type,instance_state,volume_id,volume_name,device,volume_type,volume_size_gib,ec2_price_per_hour_usd,ec2_price_per_month_usd,storage_price_per_month_usd
+,,,,,vol-0c2a4860f4e4219f2,,,gp2,250,,,25.00000
+Chao,cc,i-07380bf846135c1cb,r5.4xlarge,stopped,vol-036817bcd590d955c,,/dev/xvda,gp3,512,1.00800,735.84000,40.96000
+Liyuan_Lin,LL16S,i-0c43d80387cefe2d2,c6i.4xlarge,stopped,vol-029c8ab824454aeb9,,/dev/sda1,gp3,512,0.68000,496.40000,40.96000
+Liyuan_Lin,LL_samplseq,i-00dc114b92f1233e6,m5.4xlarge,stopped,vol-0863519ca91d4b46b,Liyuan Lin,/dev/sda1,gp3,1536,0.76800,560.64000,122.88000
+MilesKey,MR_SAMPLESEQ,i-007dfa95f5d211192,m5.8xlarge,stopped,vol-0308bf7690b45a82e,,/dev/sda1,gp2,1000,1.53600,1121.28000,100.00000
+YimingQu,YQ_T4,i-0ebebe4c0a9e25e3a,g4dn.4xlarge,stopped,vol-06e5881b24dbd0f76,,/dev/sda1,gp3,2048,1.20400,878.92000,163.84000
+Yiming_Qu,YQ_large_mem,i-0d6f37948aa684094,r6a.4xlarge,running,vol-052dbc812c87d6685,,/dev/sda1,gp2,2048,0.90720,662.25600,204.80000
+Yiming_Qu,Yiming_main,i-0bc2693196c37ce55,c5a.8xlarge,stopped,vol-0e499975a3aa0c6b7,,/dev/sda1,gp3,2048,1.23200,899.36000,163.84000
+baiyangliu,bl,i-092bc0c683ffe66b1,c5.large,stopped,vol-0f1ca2cdbf6683cdf,,/dev/sda1,gp3,1000,0.08500,62.05000,80.00000
+diego_wang_lab_key,DRG_master,i-01bac4b77e958efd9,c4.4xlarge,stopped,vol-05cb9077a1d74203e,,/dev/xvda,gp2,2000,0.79600,581.08000,200.00000
+diego_wang_lab_key,drg_compute,i-0c9e2c68ad796532d,c5a.16xlarge,stopped,vol-0a1af92d0133deb00,,/dev/xvda,gp2,2000,2.46400,1798.72000,200.00000
+jeongchan,JL_maps,i-0cc85a6af7ba1e7ff,m4.4xlarge,stopped,vol-0ccbe7325f9868983,,/dev/sda1,gp2,1000,0.80000,584.00000,100.00000
+liuliyuan12.14.2017,LY,i-0e6b7227d2e4bc6a7,t2.micro,running,vol-093d4b0d47e3e4126,,/dev/xvda,gp2,250,0.01160,8.46800,25.00000
+liuliyuan12.14.2017,LY_WGS_other,i-054b9d39a33dd1107,c5.4xlarge,stopped,vol-0529644bf1498c1f7,,/dev/xvda,gp2,200,0.68000,496.40000,20.00000
+logan,Logan-WGS-clean,i-011f095bf4d60cdb1,r7i.8xlarge,stopped,vol-08221fea82790b66c,,/dev/sda1,gp3,1024,2.11680,1545.26400,81.92000
+matthew_nemeth,matthew-nemeth,i-06da1d94e970657ea,r6i.xlarge,stopped,vol-07edda7c639c669bd,matthew-nemeth-ebs-volume,/dev/sdd,gp3,1024,0.25200,183.96000,81.92000
+matthew_nemeth,matthew-nemeth,i-06da1d94e970657ea,r6i.xlarge,stopped,vol-0b485dbdf1c7a92be,,/dev/sda1,gp2,20,0.25200,183.96000,2.00000
+matthew_nemeth,matthew-nemeth-gpu,i-01b46ecb5602f2d0c,g6.4xlarge,stopped,vol-015f0c3c0708a566e,,/dev/sda1,gp2,20,1.32320,965.93600,2.00000
+yiming_huang,Isolate biobank server,i-018c6c3c141f470ac,c5.large,running,vol-0d66dbed8f7c10c8d,Isolate biobank server,/dev/xvda,gp2,32,0.08500,62.05000,3.20000
+yiwei,YS high,i-09eaad864c387901c,c5d.12xlarge,stopped,vol-0c6fb156c14f506b1,,/dev/xvda,gp2,3000,2.30400,1681.92000,300.00000

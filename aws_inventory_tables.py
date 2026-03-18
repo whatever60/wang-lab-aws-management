@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import csv
 import json
 import subprocess
 import sys
@@ -8,8 +9,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from openpyxl import Workbook
+
 HOURS_PER_MONTH = 730
 PRICING_CACHE_TTL_SECONDS = 24 * 60 * 60
+PRICING_CACHE_VERSION = 2
 
 
 def run_aws_json(args: List[str], region: Optional[str]) -> Dict[str, Any]:
@@ -44,15 +48,19 @@ def load_cached_pricing(region: str, max_age_seconds: int) -> Optional[Dict[str,
     if age > max_age_seconds:
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return None
+    if data.get("cache_version") != PRICING_CACHE_VERSION:
+        return None
+    return data
 
 
 def save_cached_pricing(region: str, data: Dict[str, Any]) -> None:
     path = pricing_cache_path(region)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data), encoding="utf-8")
+    to_cache = {"cache_version": PRICING_CACHE_VERSION, **data}
+    path.write_text(json.dumps(to_cache), encoding="utf-8")
 
 
 def fetch_json(url: str) -> Dict[str, Any]:
@@ -101,13 +109,22 @@ def parse_pricing(region_code: str, region_data: Dict[str, Any]) -> Dict[str, An
                 continue
             if attrs.get("preInstalledSw") not in {"NA", None, ""}:
                 continue
+            capacity_status = attrs.get("capacitystatus")
+            if capacity_status not in {None, "", "Used"}:
+                continue
+            if price <= 0:
+                continue
             instance_type = attrs.get("instanceType")
-            if instance_type and instance_type not in instance_hourly:
-                instance_hourly[instance_type] = price
+            if instance_type:
+                current = instance_hourly.get(instance_type)
+                if current is None or price < current:
+                    instance_hourly[instance_type] = price
         elif product_family == "Storage":
             volume_api_name = attrs.get("volumeApiName")
-            if volume_api_name and volume_api_name not in storage_monthly_per_gb:
-                storage_monthly_per_gb[volume_api_name] = price
+            if volume_api_name and price > 0:
+                current = storage_monthly_per_gb.get(volume_api_name)
+                if current is None or price < current:
+                    storage_monthly_per_gb[volume_api_name] = price
 
     return {
         "instance_hourly": instance_hourly,
@@ -145,17 +162,69 @@ def fmt_money(amount: Optional[float]) -> str:
     return f"{amount:.5f}"
 
 
-def print_rows(rows: List[Dict[str, Any]], columns: List[Tuple[str, str]], fmt: str) -> None:
+def tag_value(resource: Dict[str, Any], key: str) -> str:
+    """Return a tag value by key for an AWS resource dict."""
+    tags = resource.get("Tags", [])
+    for tag in tags:
+        if tag.get("Key") == key:
+            return tag.get("Value", "")
+    return ""
+
+
+def print_rows(
+    rows: List[Dict[str, Any]],
+    columns: List[Tuple[str, str]],
+    fmt: str,
+    output: Optional[Path] = None,
+) -> None:
+    if output is not None:
+        suffix = output.suffix.lower()
+        if suffix == ".csv":
+            fmt = "csv"
+        elif suffix == ".json":
+            fmt = "json"
+        elif suffix == ".xlsx":
+            fmt = "xlsx"
+        elif suffix in {".txt", ".table"}:
+            fmt = "table"
+        else:
+            raise RuntimeError(
+                "Unsupported output extension. Use one of: .csv, .json, .xlsx, .txt, .table."
+            )
+        output.parent.mkdir(parents=True, exist_ok=True)
+
     if fmt == "json":
-        print(json.dumps(rows, indent=2))
+        payload = json.dumps(rows, indent=2)
+        if output is None:
+            print(payload)
+        else:
+            output.write_text(payload + "\n", encoding="utf-8")
         return
 
     if fmt == "csv":
-        header = ",".join(col[0] for col in columns)
-        print(header)
+        if output is None:
+            writer = csv.writer(sys.stdout)
+            writer.writerow([col[0] for col in columns])
+            for row in rows:
+                writer.writerow([row.get(key, "") for key, _ in columns])
+        else:
+            with output.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow([col[0] for col in columns])
+                for row in rows:
+                    writer.writerow([row.get(key, "") for key, _ in columns])
+        return
+
+    if fmt == "xlsx":
+        if output is None:
+            raise RuntimeError("xlsx output requires --output with a .xlsx extension.")
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "data"
+        sheet.append([col[0] for col in columns])
         for row in rows:
-            cells = [str(row.get(key, "")) for key, _ in columns]
-            print(",".join(cells))
+            sheet.append([row.get(key, "") for key, _ in columns])
+        workbook.save(output)
         return
 
     widths = []
@@ -169,13 +238,17 @@ def print_rows(rows: List[Dict[str, Any]], columns: List[Tuple[str, str]], fmt: 
         title.ljust(widths[i]) for i, (_, title) in enumerate(columns)
     )
     divider = "-+-".join("-" * w for w in widths)
-    print(header)
-    print(divider)
+    lines = [header, divider]
     for row in rows:
         line = " | ".join(
             str(row.get(key, "")).ljust(widths[i]) for i, (key, _) in enumerate(columns)
         )
-        print(line)
+        lines.append(line)
+    table_text = "\n".join(lines)
+    if output is None:
+        print(table_text)
+    else:
+        output.write_text(table_text + "\n", encoding="utf-8")
 
 
 def build_instance_volume_rows(
@@ -210,10 +283,12 @@ def build_instance_volume_rows(
                 rows.append(
                     {
                         "key_name": inst.get("KeyName", ""),
+                        "instance_name": tag_value(inst, "Name"),
                         "instance_id": iid,
                         "instance_type": instance_type,
                         "instance_state": (inst.get("State") or {}).get("Name", ""),
                         "volume_id": volume.get("VolumeId", ""),
+                        "volume_name": tag_value(volume, "Name"),
                         "device": attachment.get("Device", ""),
                         "volume_type": volume_type,
                         "volume_size_gib": volume_size,
@@ -235,10 +310,12 @@ def build_instance_volume_rows(
             rows.append(
                 {
                     "key_name": "",
+                    "instance_name": "",
                     "instance_id": "",
                     "instance_type": "",
                     "instance_state": "",
                     "volume_id": volume.get("VolumeId", ""),
+                    "volume_name": tag_value(volume, "Name"),
                     "device": "",
                     "volume_type": volume_type,
                     "volume_size_gib": volume_size,
@@ -258,10 +335,12 @@ def build_instance_volume_rows(
         rows.append(
             {
                 "key_name": inst.get("KeyName", ""),
+                "instance_name": tag_value(inst, "Name"),
                 "instance_id": iid,
                 "instance_type": instance_type,
                 "instance_state": (inst.get("State") or {}).get("Name", ""),
                 "volume_id": "",
+                "volume_name": "",
                 "device": "",
                 "volume_type": "",
                 "volume_size_gib": "",
@@ -295,8 +374,10 @@ def build_snapshot_rows(region: str) -> List[Dict[str, Any]]:
 
     volume_by_id = {v["VolumeId"]: v for v in volumes}
     ami_refs: Dict[str, List[str]] = {}
+    ami_name_by_id: Dict[str, str] = {}
     for image in images:
         image_id = image.get("ImageId", "")
+        ami_name_by_id[image_id] = image.get("Name", "")
         for mapping in image.get("BlockDeviceMappings", []):
             ebs = mapping.get("Ebs") or {}
             snapshot_id = ebs.get("SnapshotId")
@@ -313,6 +394,7 @@ def build_snapshot_rows(region: str) -> List[Dict[str, Any]]:
             {att.get("InstanceId", "") for att in attachments if att.get("InstanceId")}
         )
         ami_ids = sorted(set(ami_refs.get(snapshot_id, [])))
+        ami_names = [ami_name_by_id.get(ami_id, "") for ami_id in ami_ids]
 
         status_parts = []
         if attached_instance_ids:
@@ -327,11 +409,15 @@ def build_snapshot_rows(region: str) -> List[Dict[str, Any]]:
         rows.append(
             {
                 "snapshot_id": snapshot_id,
+                "snapshot_name": tag_value(snap, "Name"),
                 "size_gib": snap.get("VolumeSize", ""),
                 "volume_id": volume_id,
+                "volume_name": tag_value(volume, "Name") if volume else "",
                 "volume_exists": bool(volume),
                 "attached_instance_ids": ";".join(attached_instance_ids),
                 "ami_ids": ";".join(ami_ids),
+                "ami_names": ";".join([name for name in ami_names if name]),
+                "storage_tier": snap.get("StorageTier", ""),
                 "start_time": snap.get("StartTime", ""),
                 "description": (snap.get("Description", "") or "").replace("\n", " "),
                 "status": ",".join(status_parts),
@@ -357,7 +443,6 @@ def get_parser() -> argparse.ArgumentParser:
         default="table",
         help="Output format.",
     )
-
     sub = parser.add_subparsers(dest="command", required=True)
 
     c1 = sub.add_parser("instance-volume-table", help="Generate instance/volume/cost table.")
@@ -366,10 +451,26 @@ def get_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Always refresh pricing from AWS pricing endpoint.",
     )
+    c1.add_argument(
+        "--output",
+        type=Path,
+        help=(
+            "Write output to file and auto-detect format from extension "
+            "(.csv, .json, .xlsx, .txt, .table)."
+        ),
+    )
 
-    sub.add_parser(
+    c2 = sub.add_parser(
         "snapshot-audit-table",
         help="Generate snapshot table joined with volumes and AMIs to find dangling snapshots.",
+    )
+    c2.add_argument(
+        "--output",
+        type=Path,
+        help=(
+            "Write output to file and auto-detect format from extension "
+            "(.csv, .json, .xlsx, .txt, .table)."
+        ),
     )
     return parser
 
@@ -390,10 +491,12 @@ def main() -> int:
         rows = build_instance_volume_rows(args.region, pricing)
         columns = [
             ("key_name", "key_name"),
+            ("instance_name", "instance_name"),
             ("instance_id", "instance_id"),
             ("instance_type", "instance_type"),
             ("instance_state", "instance_state"),
             ("volume_id", "volume_id"),
+            ("volume_name", "volume_name"),
             ("device", "device"),
             ("volume_type", "volume_type"),
             ("volume_size_gib", "volume_size_gib"),
@@ -401,23 +504,27 @@ def main() -> int:
             ("ec2_price_per_month_usd", "ec2_price_per_month_usd"),
             ("storage_price_per_month_usd", "storage_price_per_month_usd"),
         ]
-        print_rows(rows, columns, args.format)
+        print_rows(rows, columns, args.format, args.output)
         return 0
 
     if args.command == "snapshot-audit-table":
         rows = build_snapshot_rows(args.region)
         columns = [
             ("snapshot_id", "snapshot_id"),
+            ("snapshot_name", "snapshot_name"),
             ("size_gib", "size_gib"),
             ("volume_id", "volume_id"),
+            ("volume_name", "volume_name"),
             ("volume_exists", "volume_exists"),
             ("attached_instance_ids", "attached_instance_ids"),
             ("ami_ids", "ami_ids"),
+            ("ami_names", "ami_names"),
+            ("storage_tier", "storage_tier"),
             ("start_time", "start_time"),
             ("status", "status"),
             ("description", "description"),
         ]
-        print_rows(rows, columns, args.format)
+        print_rows(rows, columns, args.format, args.output)
         return 0
 
     parser.print_help()
