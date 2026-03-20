@@ -31,6 +31,8 @@ Observed version after upgrade:
 - Trail name: `account-audit-trail`
 - EventBridge rule name: `ec2-ebs-ami-audit`
 - SNS topic name: `asset-audit-events`
+- Lambda enricher function name: `ec2-ebs-ami-audit-enricher`
+- Lambda enricher role name: `EC2EBSAMIAuditEnricherRole`
 - Config recorder name: `default`
 - Config delivery channel name: `default`
 - CloudTrail bucket: `my-787744166714-cloudtrail-audit`
@@ -91,10 +93,15 @@ python3 setup_ec2_ebs_ami_audit.py events \
 Per enabled region:
 
 - SNS topic: `asset-audit-events` (created if missing)
-- SNS topic policy allowing EventBridge publish (updated)
 - EventBridge rule: `ec2-ebs-ami-audit` (put-rule)
-- EventBridge rule target: `sns1` -> regional SNS topic ARN
-- In Slack mode, target includes `InputTransformer` that reshapes events into Amazon Q custom notification schema before publish to SNS
+- In email mode:
+  - SNS topic policy allowing EventBridge publish (updated)
+  - EventBridge target `sns1` -> regional SNS topic ARN
+- In Slack mode:
+  - IAM role `EC2EBSAMIAuditEnricherRole` for Lambda (create/update)
+  - Lambda function `ec2-ebs-ami-audit-enricher` in each target region (create/update)
+  - EventBridge target `enricher1` -> regional Lambda ARN
+  - Lambda publishes enriched Amazon Q custom notification JSON to SNS
 
 ### Success Verification
 
@@ -111,6 +118,11 @@ aws events list-targets-by-rule \
   --region us-east-1 \
   --output json
 
+aws lambda get-function \
+  --function-name ec2-ebs-ami-audit-enricher \
+  --region us-east-1 \
+  --output json
+
 aws sns get-topic-attributes \
   --topic-arn arn:aws:sns:us-east-1:787744166714:asset-audit-events \
   --region us-east-1 \
@@ -120,9 +132,8 @@ aws sns get-topic-attributes \
 Success signals:
 
 - Rule `State` is `ENABLED`
-- Target ARN points to SNS topic
-- In Slack mode, target has `InputTransformer` populated
-- SNS policy contains `events.amazonaws.com` with `sns:Publish`
+- Email mode: target ARN points to SNS topic and SNS policy allows `events.amazonaws.com` to publish
+- Slack mode: target ARN points to Lambda function, Lambda exists, and Lambda environment has `TOPIC_ARN` set
 
 ## Step 3: AWS Config (EC2 + EBS History)
 
@@ -222,6 +233,7 @@ Current script behavior:
 - CloudTrail trail: update-if-exists, create-if-missing
 - SNS topic: create API is idempotent; existing topic is reused
 - EventBridge rule/targets: `put-rule` and `put-targets` update in place
+- Lambda enricher role/function: create-if-missing, update-if-exists
 - IAM roles: create-if-missing, reuse-if-exists
 - AWS Config recorder and delivery channel: `put-*` updates in place
 - Slack channel configuration: create-if-missing, update-if-exists

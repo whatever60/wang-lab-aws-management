@@ -4,6 +4,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import zipfile
 from typing import Any
 
 EVENT_PATTERN = {
@@ -294,77 +296,236 @@ def set_sns_topic_policy_for_eventbridge(account_id: str, topic_arn: str, region
     )
 
 
-def build_slack_input_transformer() -> dict[str, Any]:
-    """Build EventBridge input transformer for Amazon Q custom Slack notifications."""
-    input_paths_map = {
-        "event_id": "$.id",
-        "event_time": "$.time",
-        "account": "$.account",
-        "region": "$.region",
-        "detail_type": "$.detail-type",
-        "event_name": "$.detail.eventName",
-        "event_source": "$.detail.eventSource",
-        "actor_arn": "$.detail.userIdentity.arn",
-        "key_name": "$.detail.requestParameters.keyName",
-        "instance_type": "$.detail.requestParameters.instanceType",
-        "volume_size_gib_req": "$.detail.requestParameters.size",
-        "volume_size_gib_resp": "$.detail.responseElements.size",
-        "volume_type_req": "$.detail.requestParameters.volumeType",
-        "volume_type_resp": "$.detail.responseElements.volumeType",
-        "snapshot_tier_req": "$.detail.requestParameters.storageTier",
-        "snapshot_tier_resp": "$.detail.responseElements.storageTier",
-    }
-    input_template_payload = {
-        "version": "1.0",
-        "source": "custom",
-        "id": "<event_id>",
-        "content": {
-            "textType": "client-markdown",
-            "title": ":satellite: EC2/EBS/AMI API event: <event_name>",
-            "description": (
-                "*Event:* `<event_name>`\n"
-                "*Service:* `<event_source>`\n"
-                "*Detail Type:* `<detail_type>`\n"
-                "*Account:* `<account>`\n"
-                "*Region:* `<region>`\n"
-                "*Time:* `<event_time>`\n"
-                "*Actor:* `<actor_arn>`\n"
-                "*EC2 Key Name:* `<key_name>`\n"
-                "*Instance Type:* `<instance_type>`\n"
-                "*Volume Size GiB (req/resp):* `<volume_size_gib_req>` / `<volume_size_gib_resp>`\n"
-                "*Volume Type (req/resp):* `<volume_type_req>` / `<volume_type_resp>`\n"
-                "*Snapshot Tier (req/resp):* `<snapshot_tier_req>` / `<snapshot_tier_resp>`\n"
-                "*Event ID:* `<event_id>`"
-            ),
-            "keywords": ["ec2-audit", "cloudtrail", "<event_name>"],
-        },
-        "metadata": {
-            "threadId": "ec2-ebs-ami-audit-<account>-<region>",
-            "summary": "<event_name> in <region>",
-            "additionalContext": {
-                "eventSource": "<event_source>",
-                "detailType": "<detail_type>",
-                "account": "<account>",
-                "region": "<region>",
-                "eventTime": "<event_time>",
-                "actorArn": "<actor_arn>",
-                "keyName": "<key_name>",
-                "instanceType": "<instance_type>",
-                "volumeSizeGiBRequest": "<volume_size_gib_req>",
-                "volumeSizeGiBResponse": "<volume_size_gib_resp>",
-                "volumeTypeRequest": "<volume_type_req>",
-                "volumeTypeResponse": "<volume_type_resp>",
-                "snapshotTierRequest": "<snapshot_tier_req>",
-                "snapshotTierResponse": "<snapshot_tier_resp>",
-                "eventId": "<event_id>",
+def ensure_event_rule(rule_name: str, region: str) -> str:
+    """Create or update the EventBridge rule and return the rule ARN."""
+    output = aws_json(
+        [
+            "events",
+            "put-rule",
+            "--name",
+            rule_name,
+            "--event-pattern",
+            json.dumps(EVENT_PATTERN),
+            "--state",
+            "ENABLED",
+        ],
+        region=region,
+    )
+    return output["RuleArn"]
+
+
+def sync_rule_targets(rule_name: str, desired_targets: list[dict[str, Any]], region: str) -> None:
+    """Set desired EventBridge rule targets and remove stale target IDs."""
+    desired_ids = [target["Id"] for target in desired_targets]
+    current_targets = aws_json(["events", "list-targets-by-rule", "--rule", rule_name], region=region)["Targets"]
+    remove_ids: list[str] = []
+    for target in current_targets:
+        target_id = target["Id"]
+        if target_id not in desired_ids:
+            remove_ids.append(target_id)
+
+    if remove_ids:
+        run_aws(["events", "remove-targets", "--rule", rule_name, "--ids", *remove_ids], region=region)
+
+    run_aws(
+        [
+            "events",
+            "put-targets",
+            "--rule",
+            rule_name,
+            "--targets",
+            json.dumps(desired_targets),
+        ],
+        region=region,
+    )
+
+
+def ensure_lambda_invoke_permission(
+    function_name: str,
+    statement_id: str,
+    source_arn: str,
+    region: str,
+) -> None:
+    """Ensure EventBridge can invoke the Lambda function for this rule."""
+    policy_proc = run_aws(["lambda", "get-policy", "--function-name", function_name], region=region, check=False)
+    if policy_proc.returncode == 0:
+        policy_outer = json.loads(policy_proc.stdout)
+        policy_doc = json.loads(policy_outer["Policy"])
+        for statement in policy_doc["Statement"]:
+            if statement["Sid"] == statement_id:
+                return
+
+    run_aws(
+        [
+            "lambda",
+            "add-permission",
+            "--function-name",
+            function_name,
+            "--statement-id",
+            statement_id,
+            "--action",
+            "lambda:InvokeFunction",
+            "--principal",
+            "events.amazonaws.com",
+            "--source-arn",
+            source_arn,
+        ],
+        region=region,
+    )
+
+
+def ensure_enricher_role(enricher_role_name: str, account_id: str, topic_name: str) -> str:
+    """Create or update Lambda enricher role and return role ARN."""
+    role_proc = run_aws(["iam", "get-role", "--role-name", enricher_role_name], check=False)
+    if role_proc.returncode != 0:
+        trust_policy = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {"Service": "lambda.amazonaws.com"},
+                    "Action": "sts:AssumeRole",
+                }
+            ],
+        }
+        run_aws(
+            [
+                "iam",
+                "create-role",
+                "--role-name",
+                enricher_role_name,
+                "--assume-role-policy-document",
+                json.dumps(trust_policy),
+            ]
+        )
+
+    run_aws(
+        [
+            "iam",
+            "attach-role-policy",
+            "--role-name",
+            enricher_role_name,
+            "--policy-arn",
+            "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+        ]
+    )
+
+    inline_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "ec2:DescribeInstances",
+                    "ec2:DescribeVolumes",
+                    "ec2:DescribeSnapshots",
+                ],
+                "Resource": "*",
             },
-            "enableCustomActions": True,
-        },
+            {
+                "Effect": "Allow",
+                "Action": ["sns:Publish"],
+                "Resource": f"arn:aws:sns:*:{account_id}:{topic_name}",
+            },
+        ],
     }
-    return {
-        "InputPathsMap": input_paths_map,
-        "InputTemplate": json.dumps(input_template_payload),
-    }
+    run_aws(
+        [
+            "iam",
+            "put-role-policy",
+            "--role-name",
+            enricher_role_name,
+            "--policy-name",
+            "EC2EBSAMIAuditEnricherPublishPolicy",
+            "--policy-document",
+            json.dumps(inline_policy),
+        ]
+    )
+    return aws_text(["iam", "get-role", "--role-name", enricher_role_name, "--query", "Role.Arn"])
+
+
+def build_enricher_zip(enricher_source_path: str) -> str:
+    """Package Lambda enricher source into a temporary zip and return path."""
+    tmp = tempfile.NamedTemporaryFile(prefix="ec2-audit-enricher-", suffix=".zip", delete=False)
+    tmp.close()
+    with zipfile.ZipFile(tmp.name, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.write(enricher_source_path, arcname="ec2_audit_enricher_lambda.py")
+    return tmp.name
+
+
+def ensure_enricher_lambda_function(
+    region: str,
+    function_name: str,
+    role_arn: str,
+    topic_arn: str,
+    zip_path: str,
+) -> str:
+    """Create or update Lambda enricher function and return function ARN."""
+    environment = {"Variables": {"TOPIC_ARN": topic_arn}}
+    function_proc = run_aws(["lambda", "get-function", "--function-name", function_name], region=region, check=False)
+    if function_proc.returncode != 0:
+        run_aws(
+            [
+                "lambda",
+                "create-function",
+                "--function-name",
+                function_name,
+                "--runtime",
+                "python3.12",
+                "--handler",
+                "ec2_audit_enricher_lambda.handler",
+                "--role",
+                role_arn,
+                "--timeout",
+                "30",
+                "--memory-size",
+                "256",
+                "--environment",
+                json.dumps(environment),
+                "--zip-file",
+                f"fileb://{zip_path}",
+            ],
+            region=region,
+        )
+    else:
+        run_aws(
+            [
+                "lambda",
+                "update-function-configuration",
+                "--function-name",
+                function_name,
+                "--role",
+                role_arn,
+                "--runtime",
+                "python3.12",
+                "--handler",
+                "ec2_audit_enricher_lambda.handler",
+                "--timeout",
+                "30",
+                "--memory-size",
+                "256",
+                "--environment",
+                json.dumps(environment),
+            ],
+            region=region,
+        )
+        run_aws(
+            [
+                "lambda",
+                "update-function-code",
+                "--function-name",
+                function_name,
+                "--zip-file",
+                f"fileb://{zip_path}",
+            ],
+            region=region,
+        )
+
+    run_aws(["lambda", "wait", "function-active", "--function-name", function_name], region=region)
+    return aws_text(
+        ["lambda", "get-function", "--function-name", function_name, "--query", "Configuration.FunctionArn"],
+        region=region,
+    )
 
 
 def setup_eventbridge_and_sns(
@@ -374,42 +535,60 @@ def setup_eventbridge_and_sns(
     rule_name: str,
     alert_destination: str,
     email_endpoint: str,
+    enricher_function_name: str,
+    enricher_role_name: str,
+    enricher_source_path: str,
 ) -> list[str]:
     """Set up SNS topics and EventBridge rules for EC2/EBS/AMI audit events."""
     topic_arns: list[str] = []
+    enricher_zip_path = ""
+    enricher_role_arn = ""
+
+    if alert_destination == "slack":
+        enricher_zip_path = build_enricher_zip(enricher_source_path)
+        enricher_role_arn = ensure_enricher_role(
+            enricher_role_name=enricher_role_name,
+            account_id=account_id,
+            topic_name=topic_name,
+        )
+
     for region in regions:
         topic_arn = ensure_sns_topic(topic_name, region)
         topic_arns.append(topic_arn)
         if alert_destination == "email":
             ensure_email_subscription(topic_arn, email_endpoint, region)
-        set_sns_topic_policy_for_eventbridge(account_id, topic_arn, region)
-        target = {"Id": "sns1", "Arn": topic_arn}
+
+        rule_arn = ensure_event_rule(rule_name=rule_name, region=region)
+
         if alert_destination == "slack":
-            target["InputTransformer"] = build_slack_input_transformer()
-        run_aws(
-            [
-                "events",
-                "put-rule",
-                "--name",
-                rule_name,
-                "--event-pattern",
-                json.dumps(EVENT_PATTERN),
-                "--state",
-                "ENABLED",
-            ],
-            region=region,
-        )
-        run_aws(
-            [
-                "events",
-                "put-targets",
-                "--rule",
-                rule_name,
-                "--targets",
-                json.dumps([target]),
-            ],
-            region=region,
-        )
+            function_arn = ensure_enricher_lambda_function(
+                region=region,
+                function_name=enricher_function_name,
+                role_arn=enricher_role_arn,
+                topic_arn=topic_arn,
+                zip_path=enricher_zip_path,
+            )
+            sync_rule_targets(
+                rule_name=rule_name,
+                desired_targets=[{"Id": "enricher1", "Arn": function_arn}],
+                region=region,
+            )
+            ensure_lambda_invoke_permission(
+                function_name=enricher_function_name,
+                statement_id=f"{rule_name}-InvokePermission",
+                source_arn=rule_arn,
+                region=region,
+            )
+        else:
+            set_sns_topic_policy_for_eventbridge(account_id, topic_arn, region)
+            sync_rule_targets(
+                rule_name=rule_name,
+                desired_targets=[{"Id": "sns1", "Arn": topic_arn}],
+                region=region,
+            )
+
+    if enricher_zip_path:
+        os.remove(enricher_zip_path)
     return unique_in_order(topic_arns)
 
 
@@ -800,6 +979,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--event-topic-name", default="asset-audit-events")
     parser.add_argument("--rule-name", default="ec2-ebs-ami-audit")
+    parser.add_argument("--enricher-function-name", default="ec2-ebs-ami-audit-enricher")
+    parser.add_argument("--enricher-role-name", default="EC2EBSAMIAuditEnricherRole")
+    parser.add_argument("--enricher-source-path", default="ec2_audit_enricher_lambda.py")
 
     parser.add_argument("--config-bucket", default="")
     parser.add_argument("--config-role-name", default="AWSConfigRecorderRole")
@@ -862,6 +1044,9 @@ def main() -> int:
 
     topic_arns: list[str] = []
     if args.command in ["all", "events"]:
+        enricher_source_path = args.enricher_source_path
+        if not os.path.isabs(enricher_source_path):
+            enricher_source_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), enricher_source_path)
         topic_arns = setup_eventbridge_and_sns(
             account_id=account_id,
             regions=regions,
@@ -869,6 +1054,9 @@ def main() -> int:
             rule_name=args.rule_name,
             alert_destination=args.alert_destination,
             email_endpoint=args.email_endpoint,
+            enricher_function_name=args.enricher_function_name,
+            enricher_role_name=args.enricher_role_name,
+            enricher_source_path=enricher_source_path,
         )
 
     if args.command in ["all", "slack"]:
