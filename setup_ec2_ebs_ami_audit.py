@@ -374,7 +374,7 @@ def ensure_lambda_invoke_permission(
     )
 
 
-def ensure_enricher_role(enricher_role_name: str, account_id: str, topic_name: str) -> str:
+def ensure_enricher_role(enricher_role_name: str, account_id: str, topic_name: str, thread_table_name: str) -> str:
     """Create or update Lambda enricher role and return role ARN."""
     role_proc = run_aws(["iam", "get-role", "--role-name", enricher_role_name], check=False)
     if role_proc.returncode != 0:
@@ -427,6 +427,14 @@ def ensure_enricher_role(enricher_role_name: str, account_id: str, topic_name: s
                 "Action": ["sns:Publish"],
                 "Resource": f"arn:aws:sns:*:{account_id}:{topic_name}",
             },
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "dynamodb:GetItem",
+                    "dynamodb:PutItem",
+                ],
+                "Resource": f"arn:aws:dynamodb:*:{account_id}:table/{thread_table_name}",
+            },
         ],
     }
     run_aws(
@@ -444,6 +452,28 @@ def ensure_enricher_role(enricher_role_name: str, account_id: str, topic_name: s
     return aws_text(["iam", "get-role", "--role-name", enricher_role_name, "--query", "Role.Arn"])
 
 
+def ensure_enricher_thread_table(region: str, thread_table_name: str) -> None:
+    """Create or reuse DynamoDB thread-state table for actor-based Slack threading."""
+    table_proc = run_aws(["dynamodb", "describe-table", "--table-name", thread_table_name], region=region, check=False)
+    if table_proc.returncode != 0:
+        run_aws(
+            [
+                "dynamodb",
+                "create-table",
+                "--table-name",
+                thread_table_name,
+                "--attribute-definitions",
+                "AttributeName=ActorKey,AttributeType=S",
+                "--key-schema",
+                "AttributeName=ActorKey,KeyType=HASH",
+                "--billing-mode",
+                "PAY_PER_REQUEST",
+            ],
+            region=region,
+        )
+    run_aws(["dynamodb", "wait", "table-exists", "--table-name", thread_table_name], region=region)
+
+
 def build_enricher_zip(enricher_source_path: str) -> str:
     """Package Lambda enricher source into a temporary zip and return path."""
     tmp = tempfile.NamedTemporaryFile(prefix="ec2-audit-enricher-", suffix=".zip", delete=False)
@@ -458,10 +488,16 @@ def ensure_enricher_lambda_function(
     function_name: str,
     role_arn: str,
     topic_arn: str,
+    thread_table_name: str,
     zip_path: str,
 ) -> str:
     """Create or update Lambda enricher function and return function ARN."""
-    environment = {"Variables": {"TOPIC_ARN": topic_arn}}
+    environment = {
+        "Variables": {
+            "TOPIC_ARN": topic_arn,
+            "THREAD_STATE_TABLE": thread_table_name,
+        }
+    }
     function_proc = run_aws(["lambda", "get-function", "--function-name", function_name], region=region, check=False)
     if function_proc.returncode != 0:
         run_aws(
@@ -509,6 +545,7 @@ def ensure_enricher_lambda_function(
             ],
             region=region,
         )
+        run_aws(["lambda", "wait", "function-updated", "--function-name", function_name], region=region)
         run_aws(
             [
                 "lambda",
@@ -520,6 +557,7 @@ def ensure_enricher_lambda_function(
             ],
             region=region,
         )
+        run_aws(["lambda", "wait", "function-updated", "--function-name", function_name], region=region)
 
     run_aws(["lambda", "wait", "function-active", "--function-name", function_name], region=region)
     return aws_text(
@@ -538,6 +576,7 @@ def setup_eventbridge_and_sns(
     enricher_function_name: str,
     enricher_role_name: str,
     enricher_source_path: str,
+    enricher_thread_table_name: str,
 ) -> list[str]:
     """Set up SNS topics and EventBridge rules for EC2/EBS/AMI audit events."""
     topic_arns: list[str] = []
@@ -550,6 +589,7 @@ def setup_eventbridge_and_sns(
             enricher_role_name=enricher_role_name,
             account_id=account_id,
             topic_name=topic_name,
+            thread_table_name=enricher_thread_table_name,
         )
 
     for region in regions:
@@ -561,11 +601,13 @@ def setup_eventbridge_and_sns(
         rule_arn = ensure_event_rule(rule_name=rule_name, region=region)
 
         if alert_destination == "slack":
+            ensure_enricher_thread_table(region=region, thread_table_name=enricher_thread_table_name)
             function_arn = ensure_enricher_lambda_function(
                 region=region,
                 function_name=enricher_function_name,
                 role_arn=enricher_role_arn,
                 topic_arn=topic_arn,
+                thread_table_name=enricher_thread_table_name,
                 zip_path=enricher_zip_path,
             )
             sync_rule_targets(
@@ -982,6 +1024,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enricher-function-name", default="ec2-ebs-ami-audit-enricher")
     parser.add_argument("--enricher-role-name", default="EC2EBSAMIAuditEnricherRole")
     parser.add_argument("--enricher-source-path", default="ec2_audit_enricher_lambda.py")
+    parser.add_argument("--enricher-thread-table-name", default="ec2-ebs-ami-audit-thread-state")
 
     parser.add_argument("--config-bucket", default="")
     parser.add_argument("--config-role-name", default="AWSConfigRecorderRole")
@@ -1057,6 +1100,7 @@ def main() -> int:
             enricher_function_name=args.enricher_function_name,
             enricher_role_name=args.enricher_role_name,
             enricher_source_path=enricher_source_path,
+            enricher_thread_table_name=args.enricher_thread_table_name,
         )
 
     if args.command in ["all", "slack"]:

@@ -3,6 +3,8 @@
 
 import json
 import os
+import time
+import hashlib
 from typing import Any
 
 import boto3
@@ -10,7 +12,10 @@ from botocore.exceptions import ClientError
 
 EC2_CLIENT = boto3.client("ec2")
 SNS_CLIENT = boto3.client("sns")
+DDB_CLIENT = boto3.client("dynamodb")
 TOPIC_ARN = os.environ["TOPIC_ARN"]
+THREAD_STATE_TABLE = os.environ["THREAD_STATE_TABLE"]
+THREAD_WINDOW_SECONDS = 48 * 60 * 60
 
 
 def value_at_path(data: Any, path: list[Any]) -> Any:
@@ -176,16 +181,52 @@ def describe_snapshots(snapshot_ids: list[str]) -> dict[str, dict[str, str]]:
     return mapping
 
 
+def build_thread_id(account_id: str, actor_arn: str, thread_start_epoch: int) -> str:
+    """Build deterministic thread ID using account, actor hash, and start time."""
+    actor_hash = hashlib.sha1(actor_arn.encode("utf-8")).hexdigest()[:12]
+    return f"ec2-ebs-ami-audit-{account_id}-{actor_hash}-{thread_start_epoch}"
+
+
+def resolve_thread_id(account_id: str, actor_arn: str) -> str:
+    """Resolve actor-scoped thread ID and rotate to a new thread every 48 hours."""
+    actor_key = f"{account_id}#{actor_arn}"
+    current_epoch = int(time.time())
+
+    response = DDB_CLIENT.get_item(
+        TableName=THREAD_STATE_TABLE,
+        Key={"ActorKey": {"S": actor_key}},
+        ConsistentRead=True,
+    )
+
+    if "Item" in response:
+        item = response["Item"]
+        current_thread_id = item["ThreadId"]["S"]
+        thread_start_epoch = int(item["ThreadStartEpoch"]["N"])
+        if current_epoch - thread_start_epoch <= THREAD_WINDOW_SECONDS:
+            return current_thread_id
+
+    new_thread_id = build_thread_id(account_id=account_id, actor_arn=actor_arn, thread_start_epoch=current_epoch)
+    DDB_CLIENT.put_item(
+        TableName=THREAD_STATE_TABLE,
+        Item={
+            "ActorKey": {"S": actor_key},
+            "ThreadId": {"S": new_thread_id},
+            "ThreadStartEpoch": {"N": str(current_epoch)},
+        },
+    )
+    return new_thread_id
+
+
 def build_description_lines(message_fields: dict[str, str]) -> str:
     """Build markdown description text for Amazon Q custom notification content."""
     lines = [
+        f"*Actor:* `{message_fields['actor_arn']}`",
         f"*Event:* `{message_fields['event_name']}`",
         f"*Service:* `{message_fields['event_source']}`",
         f"*Detail Type:* `{message_fields['detail_type']}`",
         f"*Account:* `{message_fields['account']}`",
         f"*Region:* `{message_fields['region']}`",
         f"*Time:* `{message_fields['event_time']}`",
-        f"*Actor:* `{message_fields['actor_arn']}`",
         f"*Instance ID:* `{message_fields['instance_id']}`",
         f"*Volume ID:* `{message_fields['volume_id']}`",
         f"*Snapshot ID:* `{message_fields['snapshot_id']}`",
@@ -288,6 +329,7 @@ def build_custom_payload(event: dict[str, Any]) -> dict[str, Any]:
     event_name = message_fields["event_name"]
     region = message_fields["region"]
     account = message_fields["account"]
+    thread_id = resolve_thread_id(account_id=account, actor_arn=message_fields["actor_arn"])
 
     payload = {
         "version": "1.0",
@@ -300,7 +342,7 @@ def build_custom_payload(event: dict[str, Any]) -> dict[str, Any]:
             "keywords": ["ec2-audit", "cloudtrail", event_name],
         },
         "metadata": {
-            "threadId": f"ec2-ebs-ami-audit-{account}-{region}",
+            "threadId": thread_id,
             "summary": f"{event_name} in {region}",
             "additionalContext": {
                 "eventSource": message_fields["event_source"],
