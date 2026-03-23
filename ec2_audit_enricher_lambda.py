@@ -125,6 +125,12 @@ def describe_instances(instance_ids: list[str]) -> dict[str, dict[str, Any]]:
             key_name = ""
             if "KeyName" in instance and instance["KeyName"] is not None:
                 key_name = str(instance["KeyName"])
+            instance_name = ""
+            if "Tags" in instance and isinstance(instance["Tags"], list):
+                for tag in instance["Tags"]:
+                    if isinstance(tag, dict) and "Key" in tag and tag["Key"] == "Name" and "Value" in tag:
+                        instance_name = str(tag["Value"])
+                        break
 
             block_device_volume_ids: list[str] = []
             if "BlockDeviceMappings" in instance:
@@ -133,6 +139,7 @@ def describe_instances(instance_ids: list[str]) -> dict[str, dict[str, Any]]:
                         block_device_volume_ids.append(str(mapping_item["Ebs"]["VolumeId"]))
 
             mapping[instance_id] = {
+                "instanceName": instance_name,
                 "keyName": key_name,
                 "instanceType": str(instance["InstanceType"]),
                 "volumeIds": unique_in_order(block_device_volume_ids),
@@ -187,6 +194,25 @@ def build_thread_id(account_id: str, actor_arn: str, thread_start_epoch: int) ->
     return f"ec2-ebs-ami-audit-{account_id}-{actor_hash}-{thread_start_epoch}"
 
 
+def extract_instance_name_from_request(request_parameters: dict[str, Any]) -> str:
+    """Extract instance Name tag from RunInstances tag specifications when present."""
+    tag_spec_items = value_at_path(request_parameters, ["tagSpecificationSet", "items"])
+    if not isinstance(tag_spec_items, list):
+        return ""
+
+    for tag_spec in tag_spec_items:
+        if not isinstance(tag_spec, dict):
+            continue
+        if "resourceType" not in tag_spec or tag_spec["resourceType"] != "instance":
+            continue
+        if "tags" not in tag_spec or not isinstance(tag_spec["tags"], list):
+            continue
+        for tag in tag_spec["tags"]:
+            if isinstance(tag, dict) and "key" in tag and tag["key"] == "Name" and "value" in tag:
+                return str(tag["value"])
+    return ""
+
+
 def resolve_thread_id(account_id: str, actor_arn: str) -> str:
     """Resolve actor-scoped thread ID and rotate to a new thread every 48 hours."""
     actor_key = f"{account_id}#{actor_arn}"
@@ -228,6 +254,7 @@ def build_description_lines(message_fields: dict[str, str]) -> str:
         f"*Region:* `{message_fields['region']}`",
         f"*Time:* `{message_fields['event_time']}`",
         f"*Instance ID:* `{message_fields['instance_id']}`",
+        f"*Instance Name:* `{message_fields['instance_name']}`",
         f"*Volume ID:* `{message_fields['volume_id']}`",
         f"*Snapshot ID:* `{message_fields['snapshot_id']}`",
         f"*EC2 Key Name:* `{message_fields['key_name']}`",
@@ -277,6 +304,12 @@ def build_custom_payload(event: dict[str, Any]) -> dict[str, Any]:
             value_at_path(instance_map, [instance_id, "instanceType"]),
         ]
     )
+    instance_name = first_non_empty(
+        [
+            value_at_path(instance_map, [instance_id, "instanceName"]),
+            extract_instance_name_from_request(request_parameters),
+        ]
+    )
 
     volume_size_gib = first_non_empty(
         [
@@ -315,6 +348,7 @@ def build_custom_payload(event: dict[str, Any]) -> dict[str, Any]:
         "event_time": str(event["time"]),
         "actor_arn": first_non_empty([value_at_path(detail, ["userIdentity", "arn"]), "unknown"]),
         "instance_id": first_non_empty([instance_id, ""]),
+        "instance_name": first_non_empty([instance_name, ""]),
         "volume_id": first_non_empty([volume_id, ""]),
         "snapshot_id": first_non_empty([snapshot_id, ""]),
         "key_name": first_non_empty([key_name, ""]),
@@ -352,6 +386,7 @@ def build_custom_payload(event: dict[str, Any]) -> dict[str, Any]:
                 "eventTime": message_fields["event_time"],
                 "actorArn": message_fields["actor_arn"],
                 "instanceId": message_fields["instance_id"],
+                "instanceName": message_fields["instance_name"],
                 "volumeId": message_fields["volume_id"],
                 "snapshotId": message_fields["snapshot_id"],
                 "keyName": message_fields["key_name"],
