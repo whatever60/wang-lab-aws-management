@@ -6,6 +6,7 @@
 - [AWS Inventory Join Table](#aws-inventory-join-table)
   - [1) Instance + Volume + Price table](#1-instance--volume--price-table)
   - [2) Snapshot audit table](#2-snapshot-audit-table)
+- [AWS Monthly EC2 Compute Cost Allocation](#aws-monthly-ec2-compute-cost-allocation)
 - [AWS Aduit Setup Script](#aws-aduit-setup-script)
   - [CLI Arguments Quick Reference](#cli-arguments-quick-reference)
   - [Step 1) CloudTrail Baseline (`cloudtrail`)](#step-1-cloudtrail-baseline-cloudtrail)
@@ -116,6 +117,65 @@ python3 aws_inventory_tables.py snapshot-audit-table --output outputs/snapshot_a
 - `.json`
 - `.xlsx`
 - `.txt` / `.table`
+
+## AWS Monthly EC2 Compute Cost Allocation
+
+`aws_monthly_compute_costs.py` allocates actual AWS Cost Explorer EC2 instance-hour compute cost to EC2 instances and key names using AWS Config history.
+
+Run:
+
+```bash
+python3 aws_monthly_compute_costs.py 2026-04 outputs/monthly_compute_2026-04
+```
+
+Or with `uv`:
+
+```bash
+uv run python aws_monthly_compute_costs.py 2026-04 outputs/monthly_compute_2026-04
+```
+
+Arguments:
+
+- `month`: billing month as `YYYY-MM`
+- `output_folder`: folder where CSV files will be written
+
+Output files:
+
+- `ec2_compute_by_key_<month>.csv`
+- `ec2_compute_by_creator_<month>.csv`
+- `ec2_compute_by_instance_<month>.csv`
+- `ec2_compute_by_instance_interval_<month>.csv`
+- `ec2_compute_type_reconciliation_<month>.csv`
+
+Notes:
+
+- Dollar totals come from AWS Cost Explorer `UnblendedCost`, not list price.
+- Per-instance and per-key costs are allocated from Cost Explorer region/type totals in proportion to AWS Config running hours.
+- Terminated instances are included when AWS Config recorded them.
+- Creator ARN comes from CloudTrail `RunInstances` events when those events are still available. Older instances may show `unknown_cloudtrail_retention`.
+
+### Method and Caveats
+
+The CLI joins two different AWS data sources:
+
+1. AWS Cost Explorer gives actual EC2 instance-hour compute dollars and billed hours grouped by `REGION` and `USAGE_TYPE`. EC2 instance usage appears as usage types like `BoxUsage:g6.4xlarge`.
+1. AWS Config gives EC2 instance history, including instance type, key name, state changes, and deleted resources when Config recorded them.
+
+Cost Explorer does not provide a built-in monthly cost grouped by EC2 key name or instance ID. To fill that gap, the script:
+
+1. Finds all instances of each region and instance type that were running during the month.
+1. Calculates each instance's AWS Config running hours for that month.
+1. Allocates the Cost Explorer total for that same region/type across those instances in proportion to running hours.
+
+For example, if Cost Explorer reports `$400` for `us-east-1` `g6.4xlarge`, and two instances ran for 100 and 300 hours, the script allocates `$100` and `$300`.
+
+This means the total dollars are AWS billed dollars, but the per-instance and per-key split is an allocation. The main assumptions and limitations are:
+
+- Same-region, same-type instance hours are treated as having the same effective hourly rate.
+- The script does not separately model Savings Plans, Reserved Instances, credits, refunds, taxes, support charges, or other billing adjustments.
+- Savings Plans and Reserved Instances can make true economic cost different from a simple instance-hour allocation, especially when benefits are shared across multiple users or instance families.
+- CloudTrail creator ARN is best-effort only. EC2 instances do not store a durable creator ARN, so older instances may show `unknown_cloudtrail_retention`.
+- AWS Config must have recorded the instance and its state history. Missing Config history can create `unattributed_config_history_gap` rows.
 
 ## AWS Aduit Setup Script
 

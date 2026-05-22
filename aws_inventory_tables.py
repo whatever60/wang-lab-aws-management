@@ -6,14 +6,17 @@ import subprocess
 import sys
 import time
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from openpyxl import Workbook
 
 HOURS_PER_MONTH = 730
 PRICING_CACHE_TTL_SECONDS = 24 * 60 * 60
 PRICING_CACHE_VERSION = 2
+AMI_CREATOR_EVENT_NAMES = ["CreateImage", "RegisterImage", "CopyImage"]
+AMI_CREATOR_LOOKUP_DAYS = 90
 
 
 def run_aws_json(args: List[str], region: Optional[str]) -> Dict[str, Any]:
@@ -34,6 +37,17 @@ def detect_default_region() -> Optional[str]:
     )
     region = (proc.stdout or "").strip()
     return region if region else None
+
+
+def list_enabled_regions() -> List[str]:
+    """Return enabled EC2 region names for the current AWS account."""
+    data = run_aws_json(["ec2", "describe-regions"], None)
+    return sorted(region["RegionName"] for region in data["Regions"])
+
+
+def parse_aws_datetime(value: str) -> datetime:
+    """Parse an AWS ISO timestamp into a UTC datetime."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
 def pricing_cache_path(region: str) -> Path:
@@ -428,6 +442,213 @@ def build_snapshot_rows(region: str) -> List[Dict[str, Any]]:
     return rows
 
 
+def collect_ami_ids(value: Any) -> Set[str]:
+    """Collect AMI IDs from nested CloudTrail response data."""
+    ami_ids: Set[str] = set()
+    if isinstance(value, str):
+        if value.startswith("ami-"):
+            ami_ids.add(value)
+    elif isinstance(value, list):
+        for item in value:
+            ami_ids.update(collect_ami_ids(item))
+    elif isinstance(value, dict):
+        for item in value.values():
+            ami_ids.update(collect_ami_ids(item))
+    return ami_ids
+
+
+def collect_snapshot_ids(images: List[Dict[str, Any]]) -> List[str]:
+    """Collect EBS snapshot IDs referenced by AMI block device mappings."""
+    snapshot_ids: Set[str] = set()
+    for image in images:
+        mappings = image["BlockDeviceMappings"] if "BlockDeviceMappings" in image else []
+        for mapping in mappings:
+            if "Ebs" in mapping and "SnapshotId" in mapping["Ebs"]:
+                snapshot_ids.add(mapping["Ebs"]["SnapshotId"])
+    return sorted(snapshot_ids)
+
+
+def describe_snapshots_by_id(
+    region: str, snapshot_ids: List[str]
+) -> Dict[str, Dict[str, Any]]:
+    """Load snapshot metadata for the given snapshot IDs."""
+    snapshots: Dict[str, Dict[str, Any]] = {}
+    if not snapshot_ids:
+        return snapshots
+
+    chunk_size = 200
+    for start in range(0, len(snapshot_ids), chunk_size):
+        chunk = snapshot_ids[start : start + chunk_size]
+        data = run_aws_json(["ec2", "describe-snapshots", "--snapshot-ids", *chunk], region)
+        for snapshot in data["Snapshots"]:
+            snapshots[snapshot["SnapshotId"]] = snapshot
+    return snapshots
+
+
+def lookup_cloudtrail_events(region: str, event_name: str) -> List[Dict[str, Any]]:
+    """Load recent CloudTrail events for one event name in one region."""
+    start_time = (
+        datetime.now(timezone.utc) - timedelta(days=AMI_CREATOR_LOOKUP_DAYS)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    base_args = [
+        "cloudtrail",
+        "lookup-events",
+        "--lookup-attributes",
+        f"AttributeKey=EventName,AttributeValue={event_name}",
+        "--start-time",
+        start_time,
+    ]
+    events: List[Dict[str, Any]] = []
+    next_token = ""
+    while True:
+        args = list(base_args)
+        if next_token:
+            args.extend(["--next-token", next_token])
+        data = run_aws_json(args, region)
+        events.extend(data["Events"])
+        if "NextToken" not in data:
+            break
+        next_token = data["NextToken"]
+    return events
+
+
+def load_creator_by_ami(region: str) -> Dict[str, Dict[str, str]]:
+    """Load best-effort AMI creator information from recent CloudTrail events."""
+    creators: Dict[str, Dict[str, str]] = {}
+    for event_name in AMI_CREATOR_EVENT_NAMES:
+        for event in lookup_cloudtrail_events(region, event_name):
+            detail = json.loads(event["CloudTrailEvent"])
+            response_elements = detail["responseElements"]
+            if response_elements is None:
+                continue
+            image_ids = collect_ami_ids(response_elements)
+            for image_id in image_ids:
+                if image_id in creators:
+                    continue
+                creators[image_id] = {
+                    "created_by_username": event["Username"],
+                    "created_by_arn": detail["userIdentity"]["arn"],
+                    "create_event_name": event_name,
+                    "create_event_time": detail["eventTime"],
+                    "cloudtrail_event_id": event["EventId"],
+                    "creator_lookup_status": "found",
+                }
+    return creators
+
+
+def ami_creator_missing_status(image: Dict[str, Any]) -> str:
+    """Return why recent CloudTrail did not provide AMI creator details."""
+    creation_time = parse_aws_datetime(image["CreationDate"])
+    cutoff = datetime.now(timezone.utc) - timedelta(days=AMI_CREATOR_LOOKUP_DAYS)
+    if creation_time < cutoff:
+        return "unknown_cloudtrail_retention"
+    return "unknown_cloudtrail_lookup"
+
+
+def block_device_size_gib(
+    mapping: Dict[str, Any], snapshots_by_id: Dict[str, Dict[str, Any]]
+) -> int:
+    """Return an EBS block device size in GiB."""
+    if "Ebs" not in mapping:
+        return 0
+    ebs = mapping["Ebs"]
+    if "VolumeSize" in ebs:
+        return int(ebs["VolumeSize"])
+    if "SnapshotId" in ebs:
+        return int(snapshots_by_id[ebs["SnapshotId"]]["VolumeSize"])
+    return 0
+
+
+def describe_ami_block_devices(
+    image: Dict[str, Any], snapshots_by_id: Dict[str, Dict[str, Any]]
+) -> Tuple[int, int, str, str]:
+    """Return total size, snapshot count, snapshot IDs, and compact device details."""
+    total_size_gib = 0
+    snapshot_ids: List[str] = []
+    device_parts: List[str] = []
+    mappings = image["BlockDeviceMappings"] if "BlockDeviceMappings" in image else []
+    for mapping in mappings:
+        size_gib = block_device_size_gib(mapping, snapshots_by_id)
+        total_size_gib += size_gib
+        snapshot_id = ""
+        if "Ebs" in mapping and "SnapshotId" in mapping["Ebs"]:
+            snapshot_id = mapping["Ebs"]["SnapshotId"]
+            snapshot_ids.append(snapshot_id)
+        if size_gib:
+            device_parts.append(f"{mapping['DeviceName']}:{size_gib}GiB:{snapshot_id}")
+    return total_size_gib, len(snapshot_ids), ";".join(snapshot_ids), ";".join(device_parts)
+
+
+def optional_image_value(image: Dict[str, Any], key: str) -> str:
+    """Return an optional AMI field as text."""
+    if key in image:
+        return str(image[key])
+    return ""
+
+
+def build_ami_rows(regions: List[str], include_creator: bool = True) -> List[Dict[str, Any]]:
+    """Build AMI audit rows across regions."""
+    rows: List[Dict[str, Any]] = []
+    for region in regions:
+        images = run_aws_json(["ec2", "describe-images", "--owners", "self"], region)["Images"]
+        snapshots_by_id = describe_snapshots_by_id(region, collect_snapshot_ids(images))
+        creator_by_ami = load_creator_by_ami(region) if include_creator else {}
+
+        for image in images:
+            image_id = image["ImageId"]
+            total_size_gib, snapshot_count, snapshot_ids, block_devices = (
+                describe_ami_block_devices(image, snapshots_by_id)
+            )
+            if image_id in creator_by_ami:
+                creator = creator_by_ami[image_id]
+            else:
+                missing_status = ami_creator_missing_status(image)
+                creator = {
+                    "created_by_username": missing_status,
+                    "created_by_arn": "",
+                    "create_event_name": "",
+                    "create_event_time": "",
+                    "cloudtrail_event_id": "",
+                    "creator_lookup_status": missing_status,
+                }
+            rows.append(
+                {
+                    "region": region,
+                    "ami_id": image_id,
+                    "name": optional_image_value(image, "Name"),
+                    "total_size_gib": total_size_gib,
+                    "snapshot_count": snapshot_count,
+                    "creation_date": image["CreationDate"],
+                    "last_launched_time": optional_image_value(image, "LastLaunchedTime"),
+                    "created_by_username": creator["created_by_username"],
+                    "created_by_arn": creator["created_by_arn"],
+                    "create_event_name": creator["create_event_name"],
+                    "create_event_time": creator["create_event_time"],
+                    "creator_lookup_status": creator["creator_lookup_status"],
+                    "source_instance_id": optional_image_value(image, "SourceInstanceId"),
+                    "source_image_id": optional_image_value(image, "SourceImageId"),
+                    "platform_details": optional_image_value(image, "PlatformDetails"),
+                    "architecture": optional_image_value(image, "Architecture"),
+                    "state": optional_image_value(image, "State"),
+                    "public": optional_image_value(image, "Public"),
+                    "root_device_name": optional_image_value(image, "RootDeviceName"),
+                    "snapshot_ids": snapshot_ids,
+                    "block_devices": block_devices,
+                    "cloudtrail_event_id": creator["cloudtrail_event_id"],
+                }
+            )
+
+    rows.sort(
+        key=lambda row: (
+            -int(row["total_size_gib"]),
+            str(row["region"]),
+            str(row["name"]),
+            str(row["ami_id"]),
+        )
+    )
+    return rows
+
+
 def get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Build joined EC2/EBS tables for cost and snapshot audit analysis."
@@ -472,6 +693,29 @@ def get_parser() -> argparse.ArgumentParser:
             "(.csv, .json, .xlsx, .txt, .table)."
         ),
     )
+
+    c3 = sub.add_parser(
+        "ami-audit-table",
+        help="Generate an AMI table sorted by total EBS-backed image size.",
+    )
+    c3.add_argument(
+        "--all-regions",
+        action="store_true",
+        help="Scan all enabled EC2 regions instead of only --region.",
+    )
+    c3.add_argument(
+        "--skip-cloudtrail-creator",
+        action="store_true",
+        help="Skip CloudTrail lookup for best-effort AMI creator attribution.",
+    )
+    c3.add_argument(
+        "--output",
+        type=Path,
+        help=(
+            "Write output to file and auto-detect format from extension "
+            "(.csv, .json, .xlsx, .txt, .table)."
+        ),
+    )
     return parser
 
 
@@ -479,7 +723,9 @@ def main() -> int:
     parser = get_parser()
     args = parser.parse_args()
 
-    if not args.region:
+    if not args.region and not (
+        args.command == "ami-audit-table" and args.all_regions
+    ):
         print(
             "No AWS region found. Set --region or configure one via `aws configure`.",
             file=sys.stderr,
@@ -523,6 +769,38 @@ def main() -> int:
             ("start_time", "start_time"),
             ("status", "status"),
             ("description", "description"),
+        ]
+        print_rows(rows, columns, args.format, args.output)
+        return 0
+
+    if args.command == "ami-audit-table":
+        regions = list_enabled_regions() if args.all_regions else [args.region]
+        rows = build_ami_rows(
+            regions, include_creator=not args.skip_cloudtrail_creator
+        )
+        columns = [
+            ("region", "region"),
+            ("ami_id", "ami_id"),
+            ("name", "name"),
+            ("total_size_gib", "total_size_gib"),
+            ("snapshot_count", "snapshot_count"),
+            ("creation_date", "creation_date"),
+            ("last_launched_time", "last_launched_time"),
+            ("created_by_username", "created_by_username"),
+            ("created_by_arn", "created_by_arn"),
+            ("create_event_name", "create_event_name"),
+            ("create_event_time", "create_event_time"),
+            ("creator_lookup_status", "creator_lookup_status"),
+            ("source_instance_id", "source_instance_id"),
+            ("source_image_id", "source_image_id"),
+            ("platform_details", "platform_details"),
+            ("architecture", "architecture"),
+            ("state", "state"),
+            ("public", "public"),
+            ("root_device_name", "root_device_name"),
+            ("snapshot_ids", "snapshot_ids"),
+            ("block_devices", "block_devices"),
+            ("cloudtrail_event_id", "cloudtrail_event_id"),
         ]
         print_rows(rows, columns, args.format, args.output)
         return 0
