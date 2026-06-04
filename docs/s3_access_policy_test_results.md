@@ -124,7 +124,7 @@ Applied policy changes:
 - Detached legacy `minimal-access` from `alumni`
 - Tagged IAM users with `AccessRole` and, where applicable, `HomeBucket`
 - Tagged S3 buckets with `BucketScope` and ownership tags
-- Added S3 bucket-policy guardrails to user, human-no-account, and shared/ops buckets
+- Added S3 bucket-policy guardrails to user and shared/ops buckets
 - Left service-managed bucket policies unmodified except for bucket tags
 
 Current group policy attachments:

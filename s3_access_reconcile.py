@@ -19,7 +19,18 @@ OBJECT_WRITE_ACTIONS = [
     "s3:PutObjectTagging",
     "s3:PutObjectVersionTagging",
 ]
-BUCKET_LIST_ACTIONS = ["s3:ListBucket", "s3:GetBucketLocation"]
+BUCKET_LIST_ACTIONS = [
+    "s3:ListBucket",
+    "s3:GetBucketLocation",
+    "s3:GetBucketAcl",
+    "s3:GetBucketOwnershipControls",
+    "s3:GetBucketPolicyStatus",
+    "s3:GetBucketPublicAccessBlock",
+    "s3:GetBucketTagging",
+    "s3:GetBucketVersioning",
+    "s3:GetEncryptionConfiguration",
+    "s3:GetLifecycleConfiguration",
+]
 OBJECT_READ_ACTIONS = ["s3:GetObject", "s3:GetObjectVersion"]
 POLICY_PREFIX = "WangLabS3Access"
 READ_POLICY_NAME = f"{POLICY_PREFIX}ReadApproved"
@@ -263,7 +274,7 @@ def group_attached_policy_arns(group_name: str) -> set[str]:
 
 def read_policy(manifest: dict[str, Any]) -> dict[str, Any]:
     """Build the read-approved-buckets policy."""
-    readable = buckets_by_scope(manifest, {"User", "HumanNoAccount", "SharedOps"})
+    readable = buckets_by_scope(manifest, {"User", "SharedOps"})
     return {
         "Version": "2012-10-17",
         "Statement": [
@@ -306,13 +317,13 @@ def member_write_policy() -> dict[str, Any]:
 
 def admin_policy(manifest: dict[str, Any]) -> dict[str, Any]:
     """Build the admin shared/ops and service-managed policy."""
-    admin_write = buckets_by_scope(manifest, {"HumanNoAccount", "SharedOps"})
+    admin_write = buckets_by_scope(manifest, {"SharedOps"})
     service = buckets_by_scope(manifest, {"ServiceManaged"})
     return {
         "Version": "2012-10-17",
         "Statement": [
             {
-                "Sid": "WriteSharedOpsAndHumanNoAccountBuckets",
+                "Sid": "WriteSharedOpsBuckets",
                 "Effect": "Allow",
                 "Action": OBJECT_WRITE_ACTIONS,
                 "Resource": [arn_for_objects(bucket) for bucket in admin_write],
@@ -623,7 +634,7 @@ def desired_bucket_policy(bucket: dict[str, Any]) -> dict[str, Any]:
     managed: list[dict[str, Any]] = []
     if bucket["scope"] == "User":
         managed = user_bucket_guardrails(bucket_name)
-    elif bucket["scope"] in {"HumanNoAccount", "SharedOps"}:
+    elif bucket["scope"] == "SharedOps":
         managed = admin_only_guardrails(bucket_name)
     else:
         managed = []

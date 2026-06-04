@@ -27,7 +27,6 @@ Recommended classes:
 | --- | --- | --- | --- |
 | `User` | `lab_members`, `alumni`, `admin` | owner only, but only if owner is current member/admin | none |
 | `SharedOps` | `lab_members`, `alumni`, `admin` | `admin` only | none |
-| `HumanNoAccount` | `lab_members`, `alumni`, `admin` | `admin` only until an IAM user is created | none |
 | `ServiceManaged` | `admin` only by default | `admin` only by default | required AWS service principals only |
 
 Service-managed buckets stay admin-only for human access.
@@ -113,19 +112,19 @@ Resolved conflict:
 | `chrmu` | `User` | no human write while owner is alumni | Christian Munck |
 | `deirdre-ricaurte` | `User` | no human write while owner is alumni | owner `Deirdre_User` |
 | `diego-gelsinger` | `User` | owner current member only | owner `Diego_User` |
-| `felix-wu` | `HumanNoAccount` | admin only | human bucket without IAM account |
+| `felix-wu` | `SharedOps` | admin only | human bucket without IAM account |
 | `florencia-velez` | `User` | no human write while owner is alumni | owner `Florencia_User` |
 | `frederik` | `User` | no human write while owner is alumni | owner `Frederik_User` |
 | `guillaume-urtecho` | `User` | no human write while owner is alumni | owner `Guillaume_user` |
 | `hazel-zhao` | `User` | no human write while owner is alumni | owner `Hazel_User` |
-| `hsing-ho` | `HumanNoAccount` | admin only | human bucket without IAM account |
-| `jacky-cheung` | `HumanNoAccount` | admin only | human bucket without IAM account |
+| `hsing-ho` | `SharedOps` | admin only | human bucket without IAM account |
+| `jacky-cheung` | `SharedOps` | admin only | human bucket without IAM account |
 | `jaysen-zhang` | `User` | no human write while owner is alumni | owner `Jaysen_User` |
 | `jayzhao` | `User` | no human write while owner is alumni | owner `Jay_User` |
 | `jeongchan-lee` | `User` | no human write while owner is alumni | owner `Jeongchan_User` |
 | `jimin-park` | `User` | no human write while owner is alumni | owner `Jimin_User` |
 | `jonathan-algoo` | `User` | no human write while owner is alumni | owner `Jonathan_User` |
-| `kendall-dabaghi` | `HumanNoAccount` | admin only | human bucket without IAM account |
+| `kendall-dabaghi` | `SharedOps` | admin only | human bucket without IAM account |
 | `liyuan-lin` | `User` | owner current member only | owner `LiyuanLin_User` |
 | `logan-schwanz` | `User` | no human write while owner is alumni | owner `Logan_User` |
 | `matthew-nemeth` | `User` | owner current member only | owner `Matthew_User` |
@@ -172,7 +171,6 @@ Resolved conflict:
    - `HomeBucket=<bucket>` only where a clear home bucket exists
 2. Tag buckets:
    - `BucketScope=User`, `BucketOwner=<IAM user>`, `OwnerAccessRole=<current group role>`
-   - `BucketScope=HumanNoAccount` for human buckets without IAM users
    - `BucketScope=SharedOps`
    - `BucketScope=ServiceManaged`
 3. Replace broad S3 write access:
@@ -182,7 +180,6 @@ Resolved conflict:
    - give `admin` read-all-approved + own-bucket-write + shared/ops write
 4. Apply guardrail denies:
    - `User`: deny writes unless `HomeBucket` matches and `AccessRole` is `CurrentMember` or `Admin`
-   - `HumanNoAccount`: deny writes unless `AccessRole=Admin`
    - `SharedOps`: deny writes unless `AccessRole=Admin`
    - `ServiceManaged`: do not apply the shared/ops deny blindly; preserve service-principal delivery policies
 5. Run IAM simulation and then real temporary object tests.
@@ -198,7 +195,7 @@ Recommended shape:
    - display name
    - group role: `admin`, `lab_members`, or `alumni`
    - home bucket, if any
-   - bucket class overrides for orphan/human-no-account/shared/service buckets
+   - bucket class overrides for orphan/shared/service buckets
 2. Add a Python CLI managed with `uv`, for example `s3_access_reconcile.py`.
 3. The CLI should:
    - read the manifest
