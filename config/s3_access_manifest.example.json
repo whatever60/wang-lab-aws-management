@@ -1,0 +1,50 @@
+{
+  "account_id": "${AWS_ACCOUNT_ID}",
+  "groups": {
+    "admin": "admin",
+    "current_member": "lab_members",
+    "alumni": "alumni"
+  },
+  "users": [
+    {
+      "user_name": "ExampleAdmin_User",
+      "role": "Admin",
+      "home_bucket": "example-admin-bucket"
+    },
+    {
+      "user_name": "ExampleMember_User",
+      "role": "CurrentMember",
+      "home_bucket": "example-member-bucket"
+    },
+    {
+      "user_name": "ExampleAlumni_User",
+      "role": "Alumni",
+      "home_bucket": "example-alumni-bucket"
+    }
+  ],
+  "buckets": [
+    {
+      "name": "example-admin-bucket",
+      "scope": "User",
+      "owner": "ExampleAdmin_User"
+    },
+    {
+      "name": "example-member-bucket",
+      "scope": "User",
+      "owner": "ExampleMember_User"
+    },
+    {
+      "name": "example-alumni-bucket",
+      "scope": "User",
+      "owner": "ExampleAlumni_User"
+    },
+    {
+      "name": "example-shared-ops-bucket",
+      "scope": "SharedOps"
+    },
+    {
+      "name": "example-service-managed-bucket",
+      "scope": "ServiceManaged"
+    }
+  ]
+}

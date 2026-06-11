@@ -1,4 +1,12 @@
 .cache/
 __pycache__/
 *.pyc
+*.egg-info/
 outputs/
+site/
+.env
+.env.*
+config/*.local.json
+config/parallelcluster_active_instance_types.txt
+config/parallelcluster_*.yaml
+docs/parallelcluster_*_catalog_current.txt
