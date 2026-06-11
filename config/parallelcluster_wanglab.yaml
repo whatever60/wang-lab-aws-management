@@ -1,0 +1,610 @@
+Region: "us-east-1"
+Image:
+  Os: "ubuntu2204"
+Tags:
+  -
+    Key: "Project"
+    Value: "wanglab-hpc"
+  -
+    Key: "ManagedBy"
+    Value: "aws-parallelcluster"
+HeadNode:
+  InstanceType: "r6a.xlarge"
+  Networking:
+    SubnetId: "subnet-606cf405"
+    ElasticIp: false
+  Ssh:
+    KeyName: "wanglab-hpc-temp-access-2026-06-10-ed25519"
+    AllowedIps: "156.111.111.152/32"
+  LocalStorage:
+    RootVolume:
+      Size: 60
+      Encrypted: true
+      VolumeType: "gp3"
+      DeleteOnTermination: true
+  Dcv:
+    Enabled: false
+  CustomActions:
+    OnNodeStart:
+      Script: "s3://wanglab-misc-backups/parallelcluster-assets/bootstrap/parallelcluster_create_lab_users.sh"
+      Args:
+        - "--install-slurm-policy-only"
+        - "s3://wanglab-misc-backups/parallelcluster-assets/bootstrap/parallelcluster_active_instance_types.txt"
+    OnNodeConfigured:
+      Script: "s3://wanglab-misc-backups/parallelcluster-assets/bootstrap/parallelcluster_create_lab_users.sh"
+      Args:
+        - "baiyang:2001,chao:2002,liu_liyuan:2003,liyuan_lin:2004,matthew:2005,yiming:2006,yiming_qu:2007,yiwei_sun:2008,yuanyuan:2009"
+        - "--enforce-head-login-limits"
+  Iam:
+    AdditionalIamPolicies:
+      -
+        Policy: "arn:aws:iam::787744166714:policy/WangLabParallelClusterAssetsReadOnly"
+SharedStorage:
+  -
+    Name: "home"
+    StorageType: "Efs"
+    MountDir: "/home"
+    EfsSettings:
+      Encrypted: true
+      EncryptionInTransit: true
+      PerformanceMode: "generalPurpose"
+      ThroughputMode: "bursting"
+      DeletionPolicy: "Delete"
+  -
+    Name: "scratch"
+    StorageType: "FsxLustre"
+    MountDir: "/scratch"
+    FsxLustreSettings:
+      StorageCapacity: 1200
+      DeploymentType: "SCRATCH_2"
+      StorageType: "SSD"
+      DataCompressionType: "LZ4"
+      DeletionPolicy: "Delete"
+Scheduling:
+  Scheduler: "slurm"
+  ScalingStrategy: "all-or-nothing"
+  SlurmSettings:
+    ScaledownIdletime: 5
+    EnableMemoryBasedScheduling: true
+    CustomSlurmSettings:
+      -
+        JobSubmitPlugins: "lua"
+      -
+        SelectTypeParameters: "CR_Core_Memory"
+  SlurmQueues:
+    -
+      Name: "cpu"
+      CapacityType: "ONDEMAND"
+      AllocationStrategy: "lowest-price"
+      Networking:
+        SubnetIds:
+          - "subnet-606cf405"
+      ComputeSettings:
+        LocalStorage:
+          RootVolume:
+            Size: 60
+            Encrypted: true
+            VolumeType: "gp3"
+          EphemeralVolume:
+            MountDir: "/local_scratch"
+      CustomActions:
+        OnNodeConfigured:
+          Script: "s3://wanglab-misc-backups/parallelcluster-assets/bootstrap/parallelcluster_create_lab_users.sh"
+          Args:
+            - "baiyang:2001,chao:2002,liu_liyuan:2003,liyuan_lin:2004,matthew:2005,yiming:2006,yiming_qu:2007,yiwei_sun:2008,yuanyuan:2009"
+      Iam:
+        AdditionalIamPolicies:
+          -
+            Policy: "arn:aws:iam::787744166714:policy/WangLabParallelClusterAssetsReadOnly"
+      ComputeResources:
+        -
+          Name: "cpu-v2-m512"
+          Instances:
+            -
+              InstanceType: "t3a.nano"
+            -
+              InstanceType: "t3.nano"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 470
+          SchedulableMemory: 486
+        -
+          Name: "cpu-v1-m512"
+          Instances:
+            -
+              InstanceType: "t2.nano"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 580
+          SchedulableMemory: 486
+        -
+          Name: "cpu-v2-m1024"
+          Instances:
+            -
+              InstanceType: "t3a.micro"
+            -
+              InstanceType: "t3.micro"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 940
+          SchedulableMemory: 972
+        -
+          Name: "cpu-v1-m1024"
+          Instances:
+            -
+              InstanceType: "t2.micro"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 1160
+          SchedulableMemory: 972
+        -
+          Name: "cpu-v2-m2048"
+          Instances:
+            -
+              InstanceType: "t3a.small"
+            -
+              InstanceType: "t3.small"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 1880
+          SchedulableMemory: 1945
+        -
+          Name: "cpu-v1-m627"
+          Instances:
+            -
+              InstanceType: "t1.micro"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 2000
+          SchedulableMemory: 595
+        -
+          Name: "cpu-v1-m1740"
+          Instances:
+            -
+              InstanceType: "m1.small"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 4400
+          SchedulableMemory: 1653
+        -
+          Name: "cpu-v2-m1740"
+          Instances:
+            -
+              InstanceType: "c1.medium"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 13000
+          SchedulableMemory: 1653
+        -
+          Name: "cpu-v4-m8192"
+          Instances:
+            -
+              InstanceType: "c6a.xlarge"
+            -
+              InstanceType: "c5a.xlarge"
+            -
+              InstanceType: "c7i-flex.xlarge"
+            -
+              InstanceType: "c5.xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 15300
+          SchedulableMemory: 7782
+        -
+          Name: "cpu-v4-m7680"
+          Instances:
+            -
+              InstanceType: "c4.xlarge"
+            -
+              InstanceType: "c3.xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 19900
+          SchedulableMemory: 7296
+        -
+          Name: "cpu-v4-m10752"
+          Instances:
+            -
+              InstanceType: "c5n.xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 21600
+          SchedulableMemory: 10214
+        -
+          Name: "cpu-v4-m15360"
+          Instances:
+            -
+              InstanceType: "m3.xlarge"
+            -
+              InstanceType: "m1.xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 26600
+          SchedulableMemory: 14592
+        -
+          Name: "cpu-v8-m16384"
+          Instances:
+            -
+              InstanceType: "c6a.2xlarge"
+            -
+              InstanceType: "c5a.2xlarge"
+            -
+              InstanceType: "c7i-flex.2xlarge"
+            -
+              InstanceType: "c5.2xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 30600
+          SchedulableMemory: 15564
+        -
+          Name: "cpu-v8-m15360"
+          Instances:
+            -
+              InstanceType: "c4.2xlarge"
+            -
+              InstanceType: "c3.2xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 39800
+          SchedulableMemory: 14592
+        -
+          Name: "cpu-v8-m21504"
+          Instances:
+            -
+              InstanceType: "c5n.2xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 43200
+          SchedulableMemory: 20428
+        -
+          Name: "cpu-v8-m7168"
+          Instances:
+            -
+              InstanceType: "c1.xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 52000
+          SchedulableMemory: 6809
+        -
+          Name: "cpu-v16-m32768"
+          Instances:
+            -
+              InstanceType: "c6a.4xlarge"
+            -
+              InstanceType: "c5a.4xlarge"
+            -
+              InstanceType: "c7i-flex.4xlarge"
+            -
+              InstanceType: "c5.4xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 61200
+          SchedulableMemory: 31129
+        -
+          Name: "cpu-v16-m65536"
+          Instances:
+            -
+              InstanceType: "m5a.4xlarge"
+            -
+              InstanceType: "m6a.4xlarge"
+            -
+              InstanceType: "m7i-flex.4xlarge"
+            -
+              InstanceType: "m5.4xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 68800
+          SchedulableMemory: 62259
+        -
+          Name: "cpu-v16-m30720"
+          Instances:
+            -
+              InstanceType: "c4.4xlarge"
+            -
+              InstanceType: "c3.4xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 79600
+          SchedulableMemory: 29184
+        -
+          Name: "cpu-v16-m43008"
+          Instances:
+            -
+              InstanceType: "c5n.4xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 86400
+          SchedulableMemory: 40857
+        -
+          Name: "cpu-v32-m65536"
+          Instances:
+            -
+              InstanceType: "c6a.8xlarge"
+            -
+              InstanceType: "c5a.8xlarge"
+            -
+              InstanceType: "c7i-flex.8xlarge"
+            -
+              InstanceType: "c6i.8xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 122400
+          SchedulableMemory: 62259
+        -
+          Name: "cpu-v32-m131072"
+          Instances:
+            -
+              InstanceType: "m5a.8xlarge"
+            -
+              InstanceType: "m6a.8xlarge"
+            -
+              InstanceType: "m7i-flex.8xlarge"
+            -
+              InstanceType: "m5.8xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 137600
+          SchedulableMemory: 124518
+        -
+          Name: "cpu-v32-m61440"
+          Instances:
+            -
+              InstanceType: "c3.8xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 168000
+          SchedulableMemory: 58368
+        -
+          Name: "cpu-v32-m249856"
+          Instances:
+            -
+              InstanceType: "r4.8xlarge"
+            -
+              InstanceType: "r3.8xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 212800
+          SchedulableMemory: 237363
+        -
+          Name: "cpu-v64-m131072"
+          Instances:
+            -
+              InstanceType: "c6a.16xlarge"
+            -
+              InstanceType: "c5a.16xlarge"
+            -
+              InstanceType: "c7i-flex.16xlarge"
+            -
+              InstanceType: "c6i.16xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 244800
+          SchedulableMemory: 124518
+        -
+          Name: "cpu-v64-m262144"
+          Instances:
+            -
+              InstanceType: "m5a.16xlarge"
+            -
+              InstanceType: "m6a.16xlarge"
+            -
+              InstanceType: "m7i-flex.16xlarge"
+            -
+              InstanceType: "m5.16xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 275200
+          SchedulableMemory: 249036
+        -
+          Name: "cpu-v64-m524288"
+          Instances:
+            -
+              InstanceType: "r5a.16xlarge"
+            -
+              InstanceType: "r6a.16xlarge"
+            -
+              InstanceType: "r5.16xlarge"
+            -
+              InstanceType: "r6i.16xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 361600
+          SchedulableMemory: 498073
+        -
+          Name: "cpu-v64-m499712"
+          Instances:
+            -
+              InstanceType: "r4.16xlarge"
+          MinCount: 0
+          MaxCount: 2
+          DynamicNodePriority: 425600
+          SchedulableMemory: 474726
+      CustomSlurmSettings:
+        DefMemPerCPU: 1024
+        MaxMemPerCPU: 65536
+    -
+      Name: "gpu"
+      CapacityType: "ONDEMAND"
+      AllocationStrategy: "lowest-price"
+      Networking:
+        SubnetIds:
+          - "subnet-606cf405"
+      ComputeSettings:
+        LocalStorage:
+          RootVolume:
+            Size: 60
+            Encrypted: true
+            VolumeType: "gp3"
+          EphemeralVolume:
+            MountDir: "/local_scratch"
+      CustomActions:
+        OnNodeConfigured:
+          Script: "s3://wanglab-misc-backups/parallelcluster-assets/bootstrap/parallelcluster_create_lab_users.sh"
+          Args:
+            - "baiyang:2001,chao:2002,liu_liyuan:2003,liyuan_lin:2004,matthew:2005,yiming:2006,yiming_qu:2007,yiwei_sun:2008,yuanyuan:2009"
+      Iam:
+        AdditionalIamPolicies:
+          -
+            Policy: "arn:aws:iam::787744166714:policy/WangLabParallelClusterAssetsReadOnly"
+      ComputeResources:
+        -
+          Name: "gpu-v4-m16384-g1"
+          Instances:
+            -
+              InstanceType: "g4dn.xlarge"
+            -
+              InstanceType: "g6.xlarge"
+            -
+              InstanceType: "g5.xlarge"
+          MinCount: 0
+          MaxCount: 1
+          DynamicNodePriority: 52600
+          SchedulableMemory: 15564
+          HealthChecks:
+            Gpu:
+              Enabled: true
+        -
+          Name: "gpu-v8-m32768-g1"
+          Instances:
+            -
+              InstanceType: "g4dn.2xlarge"
+            -
+              InstanceType: "g6.2xlarge"
+            -
+              InstanceType: "g5.2xlarge"
+          MinCount: 0
+          MaxCount: 1
+          DynamicNodePriority: 75200
+          SchedulableMemory: 31129
+          HealthChecks:
+            Gpu:
+              Enabled: true
+        -
+          Name: "gpu-v16-m65536-g1"
+          Instances:
+            -
+              InstanceType: "g4dn.4xlarge"
+            -
+              InstanceType: "g6.4xlarge"
+            -
+              InstanceType: "g5.4xlarge"
+          MinCount: 0
+          MaxCount: 1
+          DynamicNodePriority: 120400
+          SchedulableMemory: 62259
+          HealthChecks:
+            Gpu:
+              Enabled: true
+        -
+          Name: "gpu-v4-m32768-g1"
+          Instances:
+            -
+              InstanceType: "g6e.xlarge"
+          MinCount: 0
+          MaxCount: 1
+          DynamicNodePriority: 186100
+          SchedulableMemory: 31129
+          HealthChecks:
+            Gpu:
+              Enabled: true
+        -
+          Name: "gpu-v32-m131072-g1"
+          Instances:
+            -
+              InstanceType: "g6.8xlarge"
+            -
+              InstanceType: "g4dn.8xlarge"
+            -
+              InstanceType: "g5.8xlarge"
+          MinCount: 0
+          MaxCount: 1
+          DynamicNodePriority: 201441
+          SchedulableMemory: 124518
+          HealthChecks:
+            Gpu:
+              Enabled: true
+        -
+          Name: "gpu-v8-m65536-g1"
+          Instances:
+            -
+              InstanceType: "g6e.2xlarge"
+            -
+              InstanceType: "g7e.2xlarge"
+          MinCount: 0
+          MaxCount: 1
+          DynamicNodePriority: 224208
+          SchedulableMemory: 62259
+          HealthChecks:
+            Gpu:
+              Enabled: true
+        -
+          Name: "gpu-v16-m131072-g1"
+          Instances:
+            -
+              InstanceType: "g6e.4xlarge"
+            -
+              InstanceType: "g7e.4xlarge"
+          MinCount: 0
+          MaxCount: 1
+          DynamicNodePriority: 300424
+          SchedulableMemory: 124518
+          HealthChecks:
+            Gpu:
+              Enabled: true
+        -
+          Name: "gpu-v64-m262144-g1"
+          Instances:
+            -
+              InstanceType: "g6.16xlarge"
+            -
+              InstanceType: "g5.16xlarge"
+            -
+              InstanceType: "g4dn.16xlarge"
+          MinCount: 0
+          MaxCount: 1
+          DynamicNodePriority: 339680
+          SchedulableMemory: 249036
+          HealthChecks:
+            Gpu:
+              Enabled: true
+        -
+          Name: "gpu-v32-m262144-g1"
+          Instances:
+            -
+              InstanceType: "g6e.8xlarge"
+            -
+              InstanceType: "g7e.8xlarge"
+          MinCount: 0
+          MaxCount: 1
+          DynamicNodePriority: 452856
+          SchedulableMemory: 249036
+          HealthChecks:
+            Gpu:
+              Enabled: true
+        -
+          Name: "gpu-v16-m262144-g1"
+          Instances:
+            -
+              InstanceType: "p5.4xlarge"
+          MinCount: 0
+          MaxCount: 1
+          DynamicNodePriority: 688000
+          SchedulableMemory: 249036
+          HealthChecks:
+            Gpu:
+              Enabled: true
+        -
+          Name: "gpu-v64-m524288-g1"
+          Instances:
+            -
+              InstanceType: "g6e.16xlarge"
+          MinCount: 0
+          MaxCount: 1
+          DynamicNodePriority: 757719
+          SchedulableMemory: 498073
+          HealthChecks:
+            Gpu:
+              Enabled: true
+      CustomSlurmSettings:
+        DefMemPerCPU: 2048
+        MaxMemPerCPU: 131072

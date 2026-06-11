@@ -1,0 +1,196 @@
+{
+  "version": 4,
+  "name": "wanglab-parallelcluster-hpc",
+  "decision": {
+    "scheduler": "aws-parallelcluster-slurm",
+    "durable_storage": "s3",
+    "home_storage": "efs",
+    "scratch_storage": "fsx-for-lustre-ssd",
+    "compute_idle_policy": "min-count-zero",
+    "head_and_login_policy": "single-combined-head-login-instance"
+  },
+  "parallelcluster": {
+    "cluster_name": "wanglab-hpc",
+    "region": "us-east-1",
+    "config_path": "config/parallelcluster_wanglab.yaml",
+    "minimum_parallelcluster_version": "3.15.1",
+    "bootstrap_script_local_path": "scripts/parallelcluster_create_lab_users.sh",
+    "bootstrap_script_s3_uri": "s3://wanglab-misc-backups/parallelcluster-assets/bootstrap/parallelcluster_create_lab_users.sh",
+    "active_instance_types_local_path": "config/parallelcluster_active_instance_types.txt",
+    "active_instance_types_s3_uri": "s3://wanglab-misc-backups/parallelcluster-assets/bootstrap/parallelcluster_active_instance_types.txt",
+    "assets_read_policy_arn": "arn:aws:iam::787744166714:policy/WangLabParallelClusterAssetsReadOnly",
+    "subnet_ids": [
+      "subnet-606cf405"
+    ],
+    "ssh": {
+      "key_name": "wanglab-hpc-temp-access-2026-06-10-ed25519",
+      "allowed_ips": "156.111.111.152/32"
+    },
+    "head_node": {
+      "instance_type_by_architecture": {
+        "x86_64": "r6a.xlarge",
+        "arm64": "r7g.xlarge"
+      },
+      "root_volume_gib": 60
+    },
+    "compute_root_volume_gib": 60
+  },
+  "iam_user_selection": {
+    "include_groups": [
+      "lab_members",
+      "admin"
+    ],
+    "exclude_users": [
+      "Diego_User"
+    ],
+    "starting_uid": 2001
+  },
+  "login_guardrails": {
+    "cpu_quota": "200%",
+    "memory_max": "16G",
+    "max_logins": 4,
+    "max_file_size": "40G",
+    "max_processes": 512,
+    "max_open_files": 8192,
+    "cpu_time_seconds": 14400
+  },
+  "storage": [
+    {
+      "name": "home",
+      "storage_type": "Efs",
+      "mount_dir": "/home",
+      "role": "clean shared home directories for each test cluster",
+      "deletion_policy": "Delete"
+    },
+    {
+      "name": "scratch",
+      "storage_type": "FsxLustre",
+      "mount_dir": "/scratch",
+      "role": "high-throughput active scratch space",
+      "storage_capacity_gib": 1200,
+      "deployment_type": "SCRATCH_2",
+      "fsx_storage_type": "SSD",
+      "deletion_policy": "Delete"
+    }
+  ],
+  "slurm": {
+    "scaledown_idletime_minutes": 5,
+    "require_explicit_cpu_and_memory": true,
+    "multi_node_jobs": true
+  },
+  "ec2_selection": {
+    "capacity_type": "ONDEMAND",
+    "cluster_architecture": "x86_64",
+    "catalog_architectures": [
+      "x86_64",
+      "arm64"
+    ],
+    "cpu_prefixes": [
+      "a",
+      "c",
+      "m",
+      "r",
+      "t",
+      "x"
+    ],
+    "gpu_prefixes": [
+      "g",
+      "p"
+    ],
+    "excluded_prefixes": [
+      "dl",
+      "f",
+      "hpc",
+      "inf",
+      "mac",
+      "trn",
+      "u",
+      "vt"
+    ],
+    "vcpu_values": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32,
+      64
+    ],
+    "max_memory_mib": 524288,
+    "max_gpu_count": 8,
+    "instances_per_shape": 4,
+    "shapes_per_vcpu": 4
+  },
+  "queue_policy": [
+    {
+      "name": "cpu",
+      "purpose": "General CPU, memory-heavy, data-heavy, and MPI-style Linux jobs",
+      "max_count_per_resource": 2,
+      "default_mem_per_cpu_mib": 1024,
+      "max_mem_per_cpu_mib": 65536
+    },
+    {
+      "name": "gpu",
+      "purpose": "Generic NVIDIA GPU Linux jobs",
+      "max_count_per_resource": 1,
+      "default_mem_per_cpu_mib": 2048,
+      "max_mem_per_cpu_mib": 131072
+    }
+  ],
+  "slurm_test_jobs": [
+    {
+      "name": "home-efs-smoke",
+      "script": "examples/slurm_jobs/home_efs_smoke.sbatch",
+      "partition": "cpu",
+      "requires_gpu": false,
+      "expected_result": "success"
+    },
+    {
+      "name": "scratch-fsx-smoke",
+      "script": "examples/slurm_jobs/scratch_fsx_smoke.sbatch",
+      "partition": "cpu",
+      "requires_gpu": false,
+      "expected_result": "success"
+    },
+    {
+      "name": "cpu-python-smoke",
+      "script": "examples/slurm_jobs/cpu_python_smoke.sbatch",
+      "partition": "cpu",
+      "requires_gpu": false,
+      "expected_result": "success"
+    },
+    {
+      "name": "mpi-hostname-smoke",
+      "script": "examples/slurm_jobs/mpi_hostname_smoke.sbatch",
+      "partition": "cpu",
+      "requires_gpu": false,
+      "expected_result": "success"
+    },
+    {
+      "name": "gpu-nvidia-smoke",
+      "script": "examples/slurm_jobs/gpu_nvidia_smoke.sbatch",
+      "partition": "gpu",
+      "requires_gpu": true,
+      "expected_result": "success"
+    },
+    {
+      "name": "missing-resource-request-reject",
+      "script": "examples/slurm_jobs/reject_missing_resources.sbatch",
+      "partition": "cpu",
+      "requires_gpu": false,
+      "expected_result": "reject"
+    }
+  ],
+  "future_alternatives": [
+    {
+      "name": "aws-pcs",
+      "status": "replaced",
+      "when_to_revisit": "Use only if managed-control-plane simplicity becomes worth the standing PCS cost."
+    },
+    {
+      "name": "aws-batch",
+      "status": "alternative",
+      "when_to_revisit": "Use for container-first pipelines that do not need Slurm."
+    }
+  ]
+}
