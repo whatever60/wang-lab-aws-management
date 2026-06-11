@@ -1033,8 +1033,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--chatbot-region", default="")
     parser.add_argument("--slack-channel-configuration-name", default="test-configuration")
-    parser.add_argument("--slack-team-id", default="T09CK3AAC")
-    parser.add_argument("--slack-channel-id", default="C0AMDBXTDHC")
+    parser.add_argument("--slack-team-id", default="")
+    parser.add_argument("--slack-channel-id", default="")
     parser.add_argument("--slack-channel-name", default="")
     parser.add_argument("--chatbot-role-name", default="ChatbotSlackRole")
     parser.add_argument("--chatbot-role-arn", default="")
@@ -1054,6 +1054,9 @@ def validate_args(args: argparse.Namespace) -> None:
     """Validate argument combinations before running setup."""
     if args.command in ["all", "events"] and args.alert_destination == "email" and not args.email_endpoint:
         raise SystemExit("--email-endpoint is required for email destination when running all/events.")
+    if args.command in ["all", "slack"] and args.alert_destination == "slack":
+        if not args.slack_team_id or not args.slack_channel_id:
+            raise SystemExit("--slack-team-id and --slack-channel-id are required for Slack setup.")
 
 
 def print_summary(account_id: str, args: argparse.Namespace, regions: list[str], trail_bucket: str, config_bucket: str) -> None:

@@ -25,7 +25,7 @@ import sys
 def main() -> None:
     """Write and verify a small deterministic scratch payload."""
     path = pathlib.Path(sys.argv[1])
-    payload = (b"wanglab-fsx-scratch-smoke\n" * 4096)
+    payload = (b"aws-audit-fsx-scratch-smoke\n" * 4096)
     path.write_bytes(payload)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     print(f"payload_bytes={len(payload)}")

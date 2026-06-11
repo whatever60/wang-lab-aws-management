@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Optional, TextIO
 
 
-DEFAULT_MANIFEST_PATH = Path("config/aws_hpc_workflow_manifest.json")
+DEFAULT_MANIFEST_PATH = Path("config/hpc_workflow_manifest.json")
 PRICING_REGION = "us-east-1"
 QUEUE_ORDER = ["cpu", "gpu"]
 NO_GPU_MANUFACTURER = "none"
@@ -23,7 +23,18 @@ CLUSTER_ARCHITECTURES = ["x86_64", "arm64"]
 
 def load_manifest(path: Path) -> dict[str, Any]:
     """Load the AWS HPC workflow manifest."""
-    return json.loads(path.read_text(encoding="utf-8"))
+    return expand_environment_values(json.loads(path.read_text(encoding="utf-8")))
+
+
+def expand_environment_values(value: Any) -> Any:
+    """Expand environment variables in nested JSON-compatible values."""
+    if isinstance(value, str):
+        return os.path.expandvars(value)
+    if isinstance(value, list):
+        return [expand_environment_values(item) for item in value]
+    if isinstance(value, dict):
+        return {key: expand_environment_values(item) for key, item in value.items()}
+    return value
 
 
 def manifest_with_cluster_architecture(
@@ -406,8 +417,8 @@ def provision_plan_commands(manifest: dict[str, Any]) -> list[tuple[str, list[st
             [
                 "uv",
                 "run",
-                "python",
-                "aws_hpc_workflow.py",
+                "aws-audit",
+                "hpc",
                 "execute-pcluster-dryrun",
                 *architecture_args,
             ],
@@ -417,8 +428,8 @@ def provision_plan_commands(manifest: dict[str, Any]) -> list[tuple[str, list[st
             [
                 "uv",
                 "run",
-                "python",
-                "aws_hpc_workflow.py",
+                "aws-audit",
+                "hpc",
                 "create-cluster",
                 *architecture_args,
             ],
@@ -434,8 +445,8 @@ def provision_plan_commands(manifest: dict[str, Any]) -> list[tuple[str, list[st
             [
                 "uv",
                 "run",
-                "python",
-                "aws_hpc_workflow.py",
+                "aws-audit",
+                "hpc",
                 "delete-cluster",
             ],
         )

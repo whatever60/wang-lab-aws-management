@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LAB_GROUP="wanglab"
+LAB_GROUP="hpc-users"
 LAB_GID="2000"
 SLURM_POLICY_TOKEN="--install-slurm-policy-only"
 LOGIN_GUARDRAIL_TOKEN="--enforce-head-login-limits"
@@ -12,14 +12,14 @@ HEAD_LOGIN_LIMIT_PROCS="512"
 HEAD_LOGIN_MAX_SESSIONS="4"
 HEAD_LOGIN_MAX_OPEN_FILES="8192"
 HEAD_LOGIN_CPU_TIME_SECONDS="14400"
-ACTIVE_INSTANCE_TYPES_PATH="/etc/wanglab/active_instance_types.txt"
+ACTIVE_INSTANCE_TYPES_PATH="/etc/aws-audit/active_instance_types.txt"
 
-install_wanglab_sbatch_wrapper() {
-  cat <<'BASH' >/usr/local/bin/wanglab-sbatch
+install_aws_audit_sbatch_wrapper() {
+  cat <<'BASH' >/usr/local/bin/aws-audit-sbatch
 #!/usr/bin/env bash
 set -euo pipefail
 
-active_instance_types_path="/etc/wanglab/active_instance_types.txt"
+active_instance_types_path="/etc/aws-audit/active_instance_types.txt"
 instance_type=""
 resource_arg_seen=0
 constraint_arg_seen=0
@@ -120,12 +120,12 @@ fi
 
 exec sbatch "${passthrough[@]}"
 BASH
-  chmod 0755 /usr/local/bin/wanglab-sbatch
+  chmod 0755 /usr/local/bin/aws-audit-sbatch
 }
 
 install_active_instance_types() {
   active_instance_types_uri="${1}"
-  install -d -m 0755 /etc/wanglab
+  install -d -m 0755 /etc/aws-audit
   aws s3 cp "${active_instance_types_uri}" "${ACTIVE_INSTANCE_TYPES_PATH}"
   chmod 0644 "${ACTIVE_INSTANCE_TYPES_PATH}"
 }
@@ -164,7 +164,7 @@ function slurm_job_modify(job_desc, job_rec, part_list, modify_uid)
 end
 LUA
   chmod 0644 /opt/slurm/etc/job_submit.lua
-  install_wanglab_sbatch_wrapper
+  install_aws_audit_sbatch_wrapper
 }
 
 if [ "${1-}" = "${SLURM_POLICY_TOKEN}" ]; then
@@ -181,7 +181,7 @@ fi
 
 enforce_head_limits() {
   install -d -m 0755 /etc/security/limits.d
-  cat <<EOF >/etc/security/limits.d/95-wanglab-login-limits.conf
+  cat <<EOF >/etc/security/limits.d/95-aws-audit-login-limits.conf
 @${LAB_GROUP} hard nproc ${HEAD_LOGIN_LIMIT_PROCS}
 @${LAB_GROUP} soft nproc $((HEAD_LOGIN_LIMIT_PROCS - 20))
 @${LAB_GROUP} hard fsize ${HEAD_LOGIN_MAX_FILE_SIZE}
@@ -197,7 +197,7 @@ EOF
     linux_user="${item%%:*}"
     user_uid="$(id -u "${linux_user}")"
     dropin_dir="/etc/systemd/system/user-${user_uid}.slice.d"
-    dropin_file="${dropin_dir}/95-wanglab-login-limits.conf"
+    dropin_file="${dropin_dir}/95-aws-audit-login-limits.conf"
     mkdir -p "${dropin_dir}"
     cat <<EOF >/tmp/pc-head-login.slice.conf
 [Slice]

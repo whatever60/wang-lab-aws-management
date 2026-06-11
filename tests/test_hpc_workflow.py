@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import aws_hpc_workflow
+from aws_audit.hpc import workflow as hpc_workflow
 
 
 class AwsHpcWorkflowTest(unittest.TestCase):
@@ -26,7 +26,7 @@ class AwsHpcWorkflowTest(unittest.TestCase):
             "hpc7a.96xlarge": "hpc",
         }
         for instance_type, expected in cases.items():
-            self.assertEqual(aws_hpc_workflow.family_prefix(instance_type), expected)
+            self.assertEqual(hpc_workflow.family_prefix(instance_type), expected)
 
     def test_linux_user_from_iam_user_is_deterministic(self) -> None:
         """IAM names map to stable Linux user names."""
@@ -39,19 +39,19 @@ class AwsHpcWorkflowTest(unittest.TestCase):
             "NSF-Rol-User": "nsf_rol",
         }
         for iam_user, expected in cases.items():
-            self.assertEqual(aws_hpc_workflow.linux_user_from_iam_user(iam_user), expected)
+            self.assertEqual(hpc_workflow.linux_user_from_iam_user(iam_user), expected)
 
     def test_compute_resource_name_distinguishes_tiny_memory_shapes(self) -> None:
         """Resource names stay unique for sub-GiB EC2 shapes."""
         self.assertNotEqual(
-            aws_hpc_workflow.compute_resource_name("cpu", 1, 512, 0),
-            aws_hpc_workflow.compute_resource_name("cpu", 1, 627, 0),
+            hpc_workflow.compute_resource_name("cpu", 1, 512, 0),
+            hpc_workflow.compute_resource_name("cpu", 1, 627, 0),
         )
 
     def test_manifest_is_parallelcluster_first(self) -> None:
         """The manifest captures the requested ParallelCluster decision."""
-        manifest = aws_hpc_workflow.load_manifest(
-            Path("config/aws_hpc_workflow_manifest.json")
+        manifest = hpc_workflow.load_manifest(
+            Path("config/hpc_workflow_manifest.json")
         )
         self.assertEqual(manifest["decision"]["scheduler"], "aws-parallelcluster-slurm")
         self.assertEqual(manifest["decision"]["home_storage"], "efs")
@@ -60,7 +60,7 @@ class AwsHpcWorkflowTest(unittest.TestCase):
             manifest["decision"]["head_and_login_policy"],
             "single-combined-head-login-instance",
         )
-        self.assertEqual(manifest["parallelcluster"]["cluster_name"], "wanglab-hpc")
+        self.assertEqual(manifest["parallelcluster"]["cluster_name"], "lab-hpc")
         self.assertEqual(
             manifest["parallelcluster"]["head_node"]["instance_type_by_architecture"]["x86_64"],
             "r6a.xlarge",
@@ -73,20 +73,20 @@ class AwsHpcWorkflowTest(unittest.TestCase):
 
     def test_cluster_architecture_override_selects_matching_head_node(self) -> None:
         """CLI architecture overrides change both compute filtering and head/login type."""
-        manifest = aws_hpc_workflow.load_manifest(
-            Path("config/aws_hpc_workflow_manifest.json")
+        manifest = hpc_workflow.load_manifest(
+            Path("config/hpc_workflow_manifest.json")
         )
-        arm_manifest = aws_hpc_workflow.manifest_with_cluster_architecture(
+        arm_manifest = hpc_workflow.manifest_with_cluster_architecture(
             manifest, "arm64"
         )
-        self.assertEqual(aws_hpc_workflow.head_node_instance_type(manifest), "r6a.xlarge")
+        self.assertEqual(hpc_workflow.head_node_instance_type(manifest), "r6a.xlarge")
         self.assertEqual(arm_manifest["ec2_selection"]["cluster_architecture"], "arm64")
-        self.assertEqual(aws_hpc_workflow.head_node_instance_type(arm_manifest), "r7g.xlarge")
+        self.assertEqual(hpc_workflow.head_node_instance_type(arm_manifest), "r7g.xlarge")
 
     def test_manifest_uses_iam_groups_and_deletes_test_storage(self) -> None:
         """User and storage policies match the requested testing behavior."""
-        manifest = aws_hpc_workflow.load_manifest(
-            Path("config/aws_hpc_workflow_manifest.json")
+        manifest = hpc_workflow.load_manifest(
+            Path("config/hpc_workflow_manifest.json")
         )
         self.assertEqual(manifest["iam_user_selection"]["include_groups"], ["lab_members", "admin"])
         self.assertEqual(manifest["iam_user_selection"]["exclude_users"], ["Diego_User"])
@@ -95,8 +95,8 @@ class AwsHpcWorkflowTest(unittest.TestCase):
 
     def test_manifest_includes_arm_and_small_instances_in_catalog_policy(self) -> None:
         """The catalog policy includes ARM and tiny on-demand Linux instance families."""
-        manifest = aws_hpc_workflow.load_manifest(
-            Path("config/aws_hpc_workflow_manifest.json")
+        manifest = hpc_workflow.load_manifest(
+            Path("config/hpc_workflow_manifest.json")
         )
         ec2_selection = manifest["ec2_selection"]
         self.assertEqual(ec2_selection["cluster_architecture"], "x86_64")
@@ -107,8 +107,8 @@ class AwsHpcWorkflowTest(unittest.TestCase):
 
     def test_selected_users_include_lab_members_and_admins_without_diego(self) -> None:
         """IAM group selection combines current members and admins."""
-        manifest = aws_hpc_workflow.load_manifest(
-            Path("config/aws_hpc_workflow_manifest.json")
+        manifest = hpc_workflow.load_manifest(
+            Path("config/hpc_workflow_manifest.json")
         )
         fake_groups = {
             "lab_members": [
@@ -127,8 +127,8 @@ class AwsHpcWorkflowTest(unittest.TestCase):
             group_name = command[command.index("--group-name") + 1]
             return fake_groups[group_name]
 
-        with mock.patch.object(aws_hpc_workflow, "run_json", side_effect=fake_run_json):
-            users = aws_hpc_workflow.lab_users_from_iam(manifest)
+        with mock.patch.object(hpc_workflow, "run_json", side_effect=fake_run_json):
+            users = hpc_workflow.lab_users_from_iam(manifest)
 
         self.assertEqual(
             [user["iam_user"] for user in users],
@@ -142,8 +142,8 @@ class AwsHpcWorkflowTest(unittest.TestCase):
 
     def test_generated_cluster_config_contains_core_shape(self) -> None:
         """Generated config uses one head/login node, deletable storage, and generated queues."""
-        manifest = aws_hpc_workflow.load_manifest(
-            Path("config/aws_hpc_workflow_manifest.json")
+        manifest = hpc_workflow.load_manifest(
+            Path("config/hpc_workflow_manifest.json")
         )
         fake_users = [
             {"iam_user": "Baiyang_User", "linux_user": "baiyang", "uid": 2001},
@@ -181,9 +181,9 @@ class AwsHpcWorkflowTest(unittest.TestCase):
             ],
         }
 
-        with mock.patch.object(aws_hpc_workflow, "lab_users_from_iam", return_value=fake_users):
-            with mock.patch.object(aws_hpc_workflow, "grouped_candidates", return_value=fake_groups):
-                config = aws_hpc_workflow.generated_cluster_config(manifest)
+        with mock.patch.object(hpc_workflow, "lab_users_from_iam", return_value=fake_users):
+            with mock.patch.object(hpc_workflow, "grouped_candidates", return_value=fake_groups):
+                config = hpc_workflow.generated_cluster_config(manifest)
 
         self.assertIn("HeadNode", config)
         self.assertNotIn("LoginNodes", config)
@@ -192,7 +192,7 @@ class AwsHpcWorkflowTest(unittest.TestCase):
             config["HeadNode"]["CustomActions"]["OnNodeStart"]["Args"],
             [
                 "--install-slurm-policy-only",
-                "s3://wanglab-misc-backups/parallelcluster-assets/bootstrap/parallelcluster_active_instance_types.txt",
+                "s3://${PARALLELCLUSTER_ASSETS_BUCKET}/parallelcluster-assets/bootstrap/parallelcluster_active_instance_types.txt",
             ],
         )
         self.assertEqual(
@@ -210,8 +210,8 @@ class AwsHpcWorkflowTest(unittest.TestCase):
 
     def test_generated_cluster_config_uses_arm_head_when_requested(self) -> None:
         """Generated config switches the head/login node with the active architecture."""
-        manifest = aws_hpc_workflow.manifest_with_cluster_architecture(
-            aws_hpc_workflow.load_manifest(Path("config/aws_hpc_workflow_manifest.json")),
+        manifest = hpc_workflow.manifest_with_cluster_architecture(
+            hpc_workflow.load_manifest(Path("config/hpc_workflow_manifest.json")),
             "arm64",
         )
         fake_users = [
@@ -232,9 +232,9 @@ class AwsHpcWorkflowTest(unittest.TestCase):
             "gpu": [],
         }
 
-        with mock.patch.object(aws_hpc_workflow, "lab_users_from_iam", return_value=fake_users):
-            with mock.patch.object(aws_hpc_workflow, "grouped_candidates", return_value=fake_groups):
-                config = aws_hpc_workflow.generated_cluster_config(manifest)
+        with mock.patch.object(hpc_workflow, "lab_users_from_iam", return_value=fake_users):
+            with mock.patch.object(hpc_workflow, "grouped_candidates", return_value=fake_groups):
+                config = hpc_workflow.generated_cluster_config(manifest)
 
         self.assertEqual(config["HeadNode"]["InstanceType"], "r7g.xlarge")
         self.assertEqual(
@@ -244,8 +244,8 @@ class AwsHpcWorkflowTest(unittest.TestCase):
 
     def test_generic_catalog_includes_arm_and_previous_generation_tiny_instances(self) -> None:
         """Allowed catalog rows include ARM and t1.micro, while active cluster rows stay x86."""
-        manifest = aws_hpc_workflow.load_manifest(
-            Path("config/aws_hpc_workflow_manifest.json")
+        manifest = hpc_workflow.load_manifest(
+            Path("config/hpc_workflow_manifest.json")
         )
         fake_rows = [
             {
@@ -331,12 +331,12 @@ class AwsHpcWorkflowTest(unittest.TestCase):
         }
         fake_offered = set(fake_prices)
 
-        with mock.patch.object(aws_hpc_workflow, "ec2_instance_type_rows", return_value=fake_rows):
-            with mock.patch.object(aws_hpc_workflow, "available_instance_types", return_value=fake_offered):
-                with mock.patch.object(aws_hpc_workflow, "linux_on_demand_prices", return_value=fake_prices):
-                    full_rows = aws_hpc_workflow.generic_candidate_rows(manifest, False)
-                    active_rows = aws_hpc_workflow.generic_candidate_rows(manifest, True)
-                    catalog_rows = aws_hpc_workflow.instance_catalog_rows(manifest, False)
+        with mock.patch.object(hpc_workflow, "ec2_instance_type_rows", return_value=fake_rows):
+            with mock.patch.object(hpc_workflow, "available_instance_types", return_value=fake_offered):
+                with mock.patch.object(hpc_workflow, "linux_on_demand_prices", return_value=fake_prices):
+                    full_rows = hpc_workflow.generic_candidate_rows(manifest, False)
+                    active_rows = hpc_workflow.generic_candidate_rows(manifest, True)
+                    catalog_rows = hpc_workflow.instance_catalog_rows(manifest, False)
 
         full_types = [row["InstanceType"] for row in full_rows]
         active_types = [row["InstanceType"] for row in active_rows]
@@ -366,7 +366,7 @@ class AwsHpcWorkflowTest(unittest.TestCase):
         self.assertIn("--cpus-per-task", text)
         self.assertIn("--mem or --mem-per-cpu", text)
         self.assertIn("has_instance_type_constraint", text)
-        self.assertIn("wanglab-sbatch", text)
+        self.assertIn("aws-audit-sbatch", text)
         self.assertIn("--instance-type", text)
         self.assertIn("active_instance_types.txt", text)
         self.assertIn("not available in this active ParallelCluster config", text)
@@ -376,58 +376,58 @@ class AwsHpcWorkflowTest(unittest.TestCase):
 
     def test_pcluster_create_command_has_dryrun(self) -> None:
         """The dry-run create command renders the expected pcluster shape."""
-        manifest = aws_hpc_workflow.load_manifest(
-            Path("config/aws_hpc_workflow_manifest.json")
+        manifest = hpc_workflow.load_manifest(
+            Path("config/hpc_workflow_manifest.json")
         )
-        command = aws_hpc_workflow.pcluster_create_command(manifest, True)
+        command = hpc_workflow.pcluster_create_command(manifest, True)
         self.assertEqual(command[0:2], ["pcluster", "create-cluster"])
         self.assertIn("--dryrun", command)
         self.assertIn("true", command)
-        self.assertIn("config/parallelcluster_wanglab.yaml", command)
+        self.assertIn("config/parallelcluster_lab.yaml", command)
 
     def test_pcluster_delete_command_targets_cluster(self) -> None:
         """The cleanup command targets the configured cluster."""
-        manifest = aws_hpc_workflow.load_manifest(
-            Path("config/aws_hpc_workflow_manifest.json")
+        manifest = hpc_workflow.load_manifest(
+            Path("config/hpc_workflow_manifest.json")
         )
-        command = aws_hpc_workflow.pcluster_delete_command(manifest)
+        command = hpc_workflow.pcluster_delete_command(manifest)
         self.assertEqual(command[0:2], ["pcluster", "delete-cluster"])
-        self.assertIn("wanglab-hpc", command)
+        self.assertIn("lab-hpc", command)
 
     def test_bootstrap_upload_command_uses_assets_bucket(self) -> None:
         """The bootstrap upload command writes to the manifest assets prefix."""
-        manifest = aws_hpc_workflow.load_manifest(
-            Path("config/aws_hpc_workflow_manifest.json")
+        manifest = hpc_workflow.load_manifest(
+            Path("config/hpc_workflow_manifest.json")
         )
-        command = aws_hpc_workflow.bootstrap_upload_command(manifest)
+        command = hpc_workflow.bootstrap_upload_command(manifest)
         self.assertEqual(command[0:3], ["aws", "s3", "cp"])
         self.assertEqual(command[3], "scripts/parallelcluster_create_lab_users.sh")
         self.assertEqual(
             command[4],
-            "s3://wanglab-misc-backups/parallelcluster-assets/bootstrap/parallelcluster_create_lab_users.sh",
+            "s3://${PARALLELCLUSTER_ASSETS_BUCKET}/parallelcluster-assets/bootstrap/parallelcluster_create_lab_users.sh",
         )
 
     def test_active_instance_types_upload_command_uses_assets_bucket(self) -> None:
         """The active instance allowlist upload command writes to the manifest assets prefix."""
-        manifest = aws_hpc_workflow.load_manifest(
-            Path("config/aws_hpc_workflow_manifest.json")
+        manifest = hpc_workflow.load_manifest(
+            Path("config/hpc_workflow_manifest.json")
         )
-        command = aws_hpc_workflow.active_instance_types_upload_command(manifest)
+        command = hpc_workflow.active_instance_types_upload_command(manifest)
         self.assertEqual(command[0:3], ["aws", "s3", "cp"])
         self.assertEqual(command[3], "config/parallelcluster_active_instance_types.txt")
         self.assertEqual(
             command[4],
-            "s3://wanglab-misc-backups/parallelcluster-assets/bootstrap/parallelcluster_active_instance_types.txt",
+            "s3://${PARALLELCLUSTER_ASSETS_BUCKET}/parallelcluster-assets/bootstrap/parallelcluster_active_instance_types.txt",
         )
 
     def test_slurm_submit_commands_filter_gpu_and_expected_failures(self) -> None:
         """Slurm test rendering can include GPU and expected rejection tests explicitly."""
-        manifest = aws_hpc_workflow.load_manifest(
-            Path("config/aws_hpc_workflow_manifest.json")
+        manifest = hpc_workflow.load_manifest(
+            Path("config/hpc_workflow_manifest.json")
         )
-        default_commands = aws_hpc_workflow.slurm_submit_commands(manifest, False, False)
-        gpu_commands = aws_hpc_workflow.slurm_submit_commands(manifest, True, False)
-        all_commands = aws_hpc_workflow.slurm_submit_commands(manifest, True, True)
+        default_commands = hpc_workflow.slurm_submit_commands(manifest, False, False)
+        gpu_commands = hpc_workflow.slurm_submit_commands(manifest, True, False)
+        all_commands = hpc_workflow.slurm_submit_commands(manifest, True, True)
         self.assertEqual(len(default_commands), 4)
         self.assertEqual(len(gpu_commands), 5)
         self.assertEqual(len(all_commands), 6)
@@ -436,8 +436,8 @@ class AwsHpcWorkflowTest(unittest.TestCase):
 
     def test_slurm_job_files_are_real_sbatch_scripts(self) -> None:
         """Every manifest Slurm job script exists and has SBATCH directives."""
-        manifest = aws_hpc_workflow.load_manifest(
-            Path("config/aws_hpc_workflow_manifest.json")
+        manifest = hpc_workflow.load_manifest(
+            Path("config/hpc_workflow_manifest.json")
         )
         for job in manifest["slurm_test_jobs"]:
             text = Path(job["script"]).read_text(encoding="utf-8")

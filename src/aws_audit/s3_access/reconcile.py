@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -32,12 +33,11 @@ BUCKET_LIST_ACTIONS = [
     "s3:GetLifecycleConfiguration",
 ]
 OBJECT_READ_ACTIONS = ["s3:GetObject", "s3:GetObjectVersion"]
-POLICY_PREFIX = "WangLabS3Access"
+POLICY_PREFIX = "AwsAuditS3Access"
 READ_POLICY_NAME = f"{POLICY_PREFIX}ReadApproved"
 MEMBER_WRITE_POLICY_NAME = f"{POLICY_PREFIX}CurrentMemberWriteOwn"
 ADMIN_POLICY_NAME = f"{POLICY_PREFIX}AdminWriteSharedOpsAndReadService"
 ALUMNI_BASE_POLICY_NAME = f"{POLICY_PREFIX}AlumniBase"
-LEGACY_ALUMNI_POLICY_ARN = "arn:aws:iam::787744166714:policy/minimal-access"
 LEGACY_LAB_MEMBERS_S3_FULL_ACCESS_ARN = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
 
 
@@ -86,7 +86,23 @@ def compact_json(data: dict[str, Any]) -> str:
 
 def load_manifest(path: Path) -> dict[str, Any]:
     """Load the S3 access manifest."""
-    return json.loads(path.read_text(encoding="utf-8"))
+    return expand_environment_values(json.loads(path.read_text(encoding="utf-8")))
+
+
+def expand_environment_values(value: Any) -> Any:
+    """Expand environment variables in nested JSON-compatible values."""
+    if isinstance(value, str):
+        return os.path.expandvars(value)
+    if isinstance(value, list):
+        return [expand_environment_values(item) for item in value]
+    if isinstance(value, dict):
+        return {key: expand_environment_values(item) for key, item in value.items()}
+    return value
+
+
+def legacy_alumni_policy_arn(manifest: dict[str, Any]) -> str:
+    """Return the legacy alumni policy ARN for the manifest account."""
+    return f"arn:aws:iam::{manifest['account_id']}:policy/minimal-access"
 
 
 def user_by_name(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -577,9 +593,9 @@ def reconcile_bucket_tags(manifest: dict[str, Any], apply: bool) -> list[str]:
 def guardrail_sids() -> set[str]:
     """Return bucket policy statement IDs managed by this reconciler."""
     return {
-        "WangLabDenyWriteUnlessHomeBucketMatches",
-        "WangLabDenyWriteUnlessCurrentMemberOrAdmin",
-        "WangLabDenyWriteUnlessAdmin",
+        "AwsAuditDenyWriteUnlessHomeBucketMatches",
+        "AwsAuditDenyWriteUnlessCurrentMemberOrAdmin",
+        "AwsAuditDenyWriteUnlessAdmin",
     }
 
 
@@ -587,7 +603,7 @@ def user_bucket_guardrails(bucket_name: str) -> list[dict[str, Any]]:
     """Build bucket policy guardrails for a user bucket."""
     return [
         {
-            "Sid": "WangLabDenyWriteUnlessHomeBucketMatches",
+            "Sid": "AwsAuditDenyWriteUnlessHomeBucketMatches",
             "Effect": "Deny",
             "Principal": "*",
             "Action": OBJECT_WRITE_ACTIONS,
@@ -595,7 +611,7 @@ def user_bucket_guardrails(bucket_name: str) -> list[dict[str, Any]]:
             "Condition": {"StringNotEquals": {"aws:PrincipalTag/HomeBucket": bucket_name}},
         },
         {
-            "Sid": "WangLabDenyWriteUnlessCurrentMemberOrAdmin",
+            "Sid": "AwsAuditDenyWriteUnlessCurrentMemberOrAdmin",
             "Effect": "Deny",
             "Principal": "*",
             "Action": OBJECT_WRITE_ACTIONS,
@@ -613,7 +629,7 @@ def admin_only_guardrails(bucket_name: str) -> list[dict[str, Any]]:
     """Build bucket policy guardrails for admin-write-only buckets."""
     return [
         {
-            "Sid": "WangLabDenyWriteUnlessAdmin",
+            "Sid": "AwsAuditDenyWriteUnlessAdmin",
             "Effect": "Deny",
             "Principal": "*",
             "Action": OBJECT_WRITE_ACTIONS,
@@ -715,7 +731,7 @@ def reconcile_group_policies(manifest: dict[str, Any], policy_arns: dict[str, st
             groups["current_member"], LEGACY_LAB_MEMBERS_S3_FULL_ACCESS_ARN, apply
         )
     )
-    actions.extend(remove_group_attachment(groups["alumni"], LEGACY_ALUMNI_POLICY_ARN, apply))
+    actions.extend(remove_group_attachment(groups["alumni"], legacy_alumni_policy_arn(manifest), apply))
     return actions
 
 
@@ -759,7 +775,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--manifest",
         type=Path,
-        default=Path("config/s3_access_manifest.json"),
+        default=Path("config/s3_access_manifest.local.json"),
     )
     return parser.parse_args()
 

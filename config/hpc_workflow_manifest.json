@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "name": "wanglab-parallelcluster-hpc",
+  "name": "lab-parallelcluster-hpc",
   "decision": {
     "scheduler": "aws-parallelcluster-slurm",
     "durable_storage": "s3",
@@ -10,21 +10,21 @@
     "head_and_login_policy": "single-combined-head-login-instance"
   },
   "parallelcluster": {
-    "cluster_name": "wanglab-hpc",
+    "cluster_name": "lab-hpc",
     "region": "us-east-1",
-    "config_path": "config/parallelcluster_wanglab.yaml",
+    "config_path": "config/parallelcluster_lab.yaml",
     "minimum_parallelcluster_version": "3.15.1",
     "bootstrap_script_local_path": "scripts/parallelcluster_create_lab_users.sh",
-    "bootstrap_script_s3_uri": "s3://wanglab-misc-backups/parallelcluster-assets/bootstrap/parallelcluster_create_lab_users.sh",
+    "bootstrap_script_s3_uri": "s3://${PARALLELCLUSTER_ASSETS_BUCKET}/parallelcluster-assets/bootstrap/parallelcluster_create_lab_users.sh",
     "active_instance_types_local_path": "config/parallelcluster_active_instance_types.txt",
-    "active_instance_types_s3_uri": "s3://wanglab-misc-backups/parallelcluster-assets/bootstrap/parallelcluster_active_instance_types.txt",
-    "assets_read_policy_arn": "arn:aws:iam::787744166714:policy/WangLabParallelClusterAssetsReadOnly",
+    "active_instance_types_s3_uri": "s3://${PARALLELCLUSTER_ASSETS_BUCKET}/parallelcluster-assets/bootstrap/parallelcluster_active_instance_types.txt",
+    "assets_read_policy_arn": "${PARALLELCLUSTER_ASSETS_READ_POLICY_ARN}",
     "subnet_ids": [
-      "subnet-606cf405"
+      "${HPC_SUBNET_ID}"
     ],
     "ssh": {
-      "key_name": "wanglab-hpc-temp-access-2026-06-10-ed25519",
-      "allowed_ips": "156.111.111.152/32"
+      "key_name": "${HPC_KEY_NAME}",
+      "allowed_ips": "${HPC_ALLOWED_IPS}"
     },
     "head_node": {
       "instance_type_by_architecture": {

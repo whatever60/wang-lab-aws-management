@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run disposable IAM-user S3 access checks for the Wang Lab policy model."""
+"""Run disposable IAM-user S3 access checks for the configured policy model."""
 
 import json
 import os
@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Any
 
 
-ACCOUNT_ID = "787744166714"
-TARGET_USER_BUCKET = "yiming-huang"
-TARGET_SHARED_BUCKET = "seq-backup"
+ACCOUNT_ID = os.environ["AWS_AUDIT_TEST_ACCOUNT_ID"]
+TARGET_USER_BUCKET = os.environ["AWS_AUDIT_TEST_USER_BUCKET"]
+TARGET_SHARED_BUCKET = os.environ["AWS_AUDIT_TEST_SHARED_BUCKET"]
 TEST_PREFIX = "codex-s3-access-test"
 TEST_BODY = Path("/tmp/s3-access-test-body.txt")
 

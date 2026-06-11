@@ -5,3 +5,18 @@ requires-python = ">=3.9"
 dependencies = [
     "openpyxl>=3.1.5",
 ]
+
+[project.scripts]
+aws-audit = "aws_audit.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "mkdocs-material>=9.6.0",
+]

@@ -2,7 +2,7 @@
 
 These scripts are safe local stand-ins for future computation-heavy and data-heavy
 AWS PCS/Slurm jobs. The defaults are intentionally small enough to run on a laptop.
-The large AWS-shaped arguments live in `config/aws_hpc_workflow_manifest.json`.
+The large AWS-shaped arguments live in `config/hpc_workflow_manifest.json`.
 
 Run local smoke tests:
 
