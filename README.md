@@ -7,6 +7,7 @@
   - [1) Instance + Volume + Price table](#1-instance--volume--price-table)
   - [2) Snapshot audit table](#2-snapshot-audit-table)
 - [AWS Monthly EC2 Compute Cost Allocation](#aws-monthly-ec2-compute-cost-allocation)
+- [AWS HPC Workflow MVP](#aws-hpc-workflow-mvp)
 - [AWS Aduit Setup Script](#aws-aduit-setup-script)
   - [CLI Arguments Quick Reference](#cli-arguments-quick-reference)
   - [Step 1) CloudTrail Baseline (`cloudtrail`)](#step-1-cloudtrail-baseline-cloudtrail)
@@ -176,6 +177,46 @@ This means the total dollars are AWS billed dollars, but the per-instance and pe
 - Savings Plans and Reserved Instances can make true economic cost different from a simple instance-hour allocation, especially when benefits are shared across multiple users or instance families.
 - CloudTrail creator ARN is best-effort only. EC2 instances do not store a durable creator ARN, so older instances may show `unknown_cloudtrail_retention`.
 - AWS Config must have recorded the instance and its state history. Missing Config history can create `unattributed_config_history_gap` rows.
+
+## AWS HPC Workflow MVP
+
+This project now targets **AWS ParallelCluster + Slurm** for lab compute.
+
+- Head/login node: one combined `r6a.xlarge` instance.
+- Shared home: `EFS` at `/home`, deleted with the test cluster.
+- Shared scratch: `FSx for Lustre SSD` at `/scratch`, deleted with the test cluster.
+- Active user set is generated from IAM groups `lab_members` and `admin`, excluding `Diego_User`.
+- Queues: CPU and GPU Slurm queues with `MinCount: 0`.
+- Compute resources are generated from the live EC2 catalog and AWS Pricing API.
+- The allowed catalog includes x86_64 and arm64 Linux instances, but the active test cluster is x86_64 because ParallelCluster requires one architecture across head, login, and compute nodes.
+- Slurm jobs must specify explicit CPU and memory requests, or use `wanglab-sbatch --instance-type <type>` on the head/login node to request a concrete active EC2 instance type.
+
+Reference docs:
+
+- `docs/aws_hpc_workflow_proposal.md`
+- `docs/aws_hpc_workflow_implementation.md`
+- `docs/aws_parallelcluster_workflow.md`
+
+Describe and preview the workflow:
+
+```bash
+uv run python aws_hpc_workflow.py describe
+uv run python aws_hpc_workflow.py list-users
+uv run python aws_hpc_workflow.py list-slurm-jobs
+uv run python aws_hpc_workflow.py list-instance-catalog
+uv run python aws_hpc_workflow.py list-instance-catalog --active-cluster-only
+uv run python aws_hpc_workflow.py generate-config
+uv run python aws_hpc_workflow.py generate-config --cluster-architecture arm64
+uv run python aws_hpc_workflow.py execute-pcluster-dryrun
+```
+
+Create and delete the test cluster:
+
+```bash
+uv run python aws_hpc_workflow.py create-cluster
+uv run python aws_hpc_workflow.py create-cluster --cluster-architecture arm64
+uv run python aws_hpc_workflow.py delete-cluster
+```
 
 ## AWS Aduit Setup Script
 
