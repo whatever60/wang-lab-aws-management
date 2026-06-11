@@ -1,0 +1,50 @@
+site_name: AWS Audit
+site_description: Local documentation for AWS audit, access, cost, inventory, and HPC tooling.
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: blue grey
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - scheme: default
+      primary: blue grey
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - User Guides:
+      - HPC Jobs: user/hpc_jobs.md
+      - Inventory And Costs: user/inventory_and_costs.md
+  - Admin Runbooks:
+      - ParallelCluster HPC: admin/parallelcluster_hpc.md
+      - Audit Alert Setup: admin/audit_setup.md
+      - S3 Access: admin/s3_access.md
+  - Developer Notes:
+      - Architecture: developer/architecture.md
+      - HPC Implementation: developer/hpc_implementation.md
+      - Refactor TODO: developer/refactor_modular_docs_todo.md
+  - Reference And Archive:
+      - AWS HPC Workflow Proposal: reference/aws_hpc_workflow_proposal.md
+      - AWS PCS + EFS Archive: reference/aws_pcs_efs_workflow.md
+      - S3 Access Model: reference/s3_access_model.md
+      - S3 Enforcement Review: reference/s3_access_enforcement_review.md
+      - S3 Policy Test Results: reference/s3_access_policy_test_results.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - tables
