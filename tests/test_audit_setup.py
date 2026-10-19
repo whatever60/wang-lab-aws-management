@@ -12,6 +12,39 @@ from aws_audit.audit import setup
 
 
 class AuditSetupTest(unittest.TestCase):
+    def test_default_targets_only_base_region_without_region_discovery(self):
+        with patch.object(setup, "aws_text") as discover:
+            self.assertEqual(setup.resolve_target_regions("", "us-east-1"), ["us-east-1"])
+            self.assertEqual(setup.resolve_target_regions("  ", "us-west-2"), ["us-west-2"])
+        discover.assert_not_called()
+
+    def test_target_region_expansion_is_explicit(self):
+        with patch.object(setup, "aws_text", return_value="us-east-1\tus-west-2") as discover:
+            self.assertEqual(
+                setup.resolve_target_regions("us-west-2, us-east-1 us-west-2", "us-east-1"),
+                ["us-west-2", "us-east-1"],
+            )
+            discover.assert_not_called()
+            self.assertEqual(setup.resolve_target_regions("all", "us-east-1"),
+                             ["us-east-1", "us-west-2"])
+            discover.assert_called_once()
+            for selection in (",", "all,us-east-1"):
+                with self.subTest(selection=selection), self.assertRaises(SystemExit):
+                    setup.resolve_target_regions(selection, "us-east-1")
+
+    def test_cloudtrail_keeps_multi_region_coverage_for_create_and_update(self):
+        for existing in ("None", "example-trail"):
+            with self.subTest(existing=existing), \
+                    patch.object(setup, "ensure_s3_bucket"), \
+                    patch.object(setup, "aws_text", return_value=existing), \
+                    patch.object(setup, "run_aws") as run:
+                setup.setup_cloudtrail("111122223333", "us-east-1", "example-trail", "example-trail-bucket")
+            operation = "update-trail" if existing == "example-trail" else "create-trail"
+            trail_calls = [call for call in run.call_args_list if call.args[0][:2] == ["cloudtrail", operation]]
+            self.assertEqual(len(trail_calls), 1)
+            self.assertIn("--is-multi-region-trail", trail_calls[0].args[0])
+            self.assertEqual(trail_calls[0].kwargs["region"], "us-east-1")
+
     def test_invalid_environment_choices_are_rejected_before_setup(self):
         for name, value in {"ALERT_DESTINATION": "sms", "CHATBOT_LOGGING_LEVEL": "DEBUG",
                             "CHATBOT_USER_AUTHORIZATION_REQUIRED": "yes"}.items():
@@ -21,11 +54,14 @@ class AuditSetupTest(unittest.TestCase):
                     setup.validate_args(setup.parse_args())
 
     def test_legacy_environment_flags_and_packaged_enricher_source(self):
-        with patch.dict(os.environ, {"BASE_REGION": "us-east-2", "EMAIL_ENDPOINT": "audit@example.test"}, clear=True), \
-                patch("sys.argv", ["audit-setup", "--base-region", "us-west-2"]):
+        with patch.dict(os.environ, {"BASE_REGION": "us-east-2", "TARGET_REGIONS": "all",
+                                     "EMAIL_ENDPOINT": "audit@example.test"}, clear=True), \
+                patch("sys.argv", ["audit-setup", "--base-region", "us-west-2",
+                                   "--target-regions", "us-west-2"]):
             args = setup.parse_args()
             setup.validate_args(args)
         self.assertEqual(args.base_region, "us-west-2")
+        self.assertEqual(args.target_regions, "us-west-2")
         self.assertEqual(args.email_endpoint, "audit@example.test")
         self.assertEqual(args.chatbot_region, "us-east-2")
         source = Path(args.enricher_source_path)
@@ -73,8 +109,7 @@ class AuditSetupTest(unittest.TestCase):
             if destination == "email":
                 arguments += ["--alert-destination", "email", "--email-endpoint", "audit@example.test"]
             with self.subTest(destination=destination), patch.dict(os.environ, {}, clear=True), \
-                    patch("sys.argv", arguments), patch.object(setup, "aws_text", return_value="111122223333"), \
-                    patch.object(setup, "resolve_target_regions", return_value=["us-east-1"]), \
+                    patch("sys.argv", arguments), patch.object(setup, "aws_text", return_value="111122223333") as lookup, \
                     patch.object(setup, "setup_cloudtrail") as trail, \
                     patch.object(setup, "setup_config") as config, \
                     patch.object(setup, "setup_eventbridge_and_sns", return_value=[]) as events, \
@@ -83,5 +118,8 @@ class AuditSetupTest(unittest.TestCase):
                 self.assertEqual(setup.main(), 0)
                 trail.assert_called_once()
                 config.assert_called_once()
+                self.assertEqual(config.call_args.kwargs["regions"], ["us-east-1"])
+                self.assertEqual(events.call_args.kwargs["regions"], ["us-east-1"])
                 self.assertEqual(events.call_args.kwargs["alert_destination"], destination)
                 slack.assert_not_called()
+                lookup.assert_called_once_with(["sts", "get-caller-identity", "--query", "Account"])

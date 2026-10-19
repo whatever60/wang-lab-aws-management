@@ -107,10 +107,16 @@ def parse_optional_bool(value: str | None) -> bool | None:
     raise SystemExit("Boolean options must be 'true' or 'false'.")
 
 
-def resolve_target_regions(target_regions_arg: str) -> list[str]:
-    """Resolve target AWS regions from argument or account-enabled regions."""
-    if target_regions_arg:
-        return parse_list_csv(target_regions_arg)
+def resolve_target_regions(target_regions_arg: str, base_region: str) -> list[str]:
+    """Default regional resources to the base region; expand only when requested."""
+    selection = target_regions_arg.strip()
+    if not selection:
+        return [base_region]
+    if selection != "all":
+        regions = unique_in_order(parse_list_csv(selection))
+        if not regions or "all" in regions:
+            raise SystemExit("--target-regions requires a region list or 'all' by itself.")
+        return regions
     regions_raw = aws_text(
         [
             "ec2",
@@ -120,7 +126,7 @@ def resolve_target_regions(target_regions_arg: str) -> list[str]:
             "Regions[?OptInStatus=='opt-in-not-required'||OptInStatus=='opted-in'].RegionName",
         ]
     )
-    return parse_list_csv(regions_raw)
+    return unique_in_order(parse_list_csv(regions_raw))
 
 
 def ensure_s3_bucket(bucket: str, region: str) -> None:
@@ -1023,7 +1029,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--email-endpoint", default=os.environ.get('EMAIL_ENDPOINT', ""))
 
     parser.add_argument("--base-region", default=os.environ.get('BASE_REGION', "us-east-1"))
-    parser.add_argument("--target-regions", default=os.environ.get('TARGET_REGIONS', ""))
+    parser.add_argument(
+        "--target-regions",
+        default=os.environ.get('TARGET_REGIONS', ""),
+        help="Regional Config/notification targets: defaults to --base-region; use a region list or explicit 'all'.",
+    )
 
     parser.add_argument("--trail-name", default=os.environ.get('TRAIL_NAME', "account-audit-trail"))
     parser.add_argument("--trail-bucket", default=os.environ.get('TRAIL_BUCKET', ""))
@@ -1097,7 +1107,7 @@ def main() -> int:
     validate_args(args)
 
     account_id = aws_text(["sts", "get-caller-identity", "--query", "Account"])
-    regions = resolve_target_regions(args.target_regions)
+    regions = resolve_target_regions(args.target_regions, args.base_region)
 
     trail_bucket = args.trail_bucket if args.trail_bucket else f"my-{account_id}-cloudtrail-audit"
     config_bucket = args.config_bucket if args.config_bucket else f"my-{account_id}-config-history"

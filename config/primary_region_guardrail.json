@@ -1,0 +1,75 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyRegionalActionsOutsidePrimaryRegion",
+      "Effect": "Deny",
+      "NotAction": [
+        "iam:*",
+        "sts:*",
+        "s3:*",
+        "route53:*",
+        "route53domains:*",
+        "cloudfront:*",
+        "organizations:*",
+        "account:*",
+        "support:*",
+        "supportapp:*",
+        "health:*",
+        "aws-portal:*",
+        "billing:*",
+        "billingconductor:*",
+        "bcm-data-exports:*",
+        "ce:*",
+        "budgets:*",
+        "cur:*",
+        "pricing:*",
+        "payments:*",
+        "invoicing:*",
+        "tax:*",
+        "consolidatedbilling:*",
+        "purchase-orders:*",
+        "freetier:*",
+        "mapcredits:*",
+        "sustainability:*",
+        "chatbot:*",
+        "ec2:Describe*",
+        "ec2:DeleteSnapshot",
+        "ec2:DeleteVolume",
+        "ec2:DeregisterImage",
+        "ec2:TerminateInstances",
+        "ec2:StopInstances",
+        "config:Describe*",
+        "config:Get*",
+        "config:List*",
+        "cloudtrail:Describe*",
+        "cloudtrail:Get*",
+        "cloudtrail:List*",
+        "cloudtrail:LookupEvents",
+        "kms:Decrypt",
+        "kms:GenerateDataKey*",
+        "kms:DescribeKey"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    },
+    {
+      "Sid": "DenyNewS3BucketsOutsidePrimaryRegion",
+      "Effect": "Deny",
+      "Action": "s3:CreateBucket",
+      "Resource": "*",
+      "Condition": {
+        "Null": {
+          "s3:LocationConstraint": "false"
+        },
+        "StringNotEquals": {
+          "s3:LocationConstraint": "us-east-1"
+        }
+      }
+    }
+  ]
+}
