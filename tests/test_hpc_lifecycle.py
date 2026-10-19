@@ -544,8 +544,11 @@ class LifecycleTest(unittest.TestCase):
         self.assertTrue(any(resource.endswith("/users/current.json") for resource in resources))
         self.assertFalse(any(resource.endswith("/parallelcluster-assets/*") for resource in resources))
 
-    def test_storage_cleanup_default_refuses_before_any_aws_call(self):
+    def test_storage_cleanup_production_override_refuses_before_any_aws_call(self):
         manifest = self.manifest()
+        manifest["storage_management"] = {"purpose": "production", "allow_cleanup": False}
+        for item in manifest["storage"]:
+            item["deletion_policy"] = "Retain"
         with mock.patch.object(workflow, "run_json") as read, mock.patch.object(workflow, "run_command") as mutation:
             with self.assertRaisesRegex(ValueError, "explicit test manifest"):
                 workflow.cleanup_tagged_storage(manifest)

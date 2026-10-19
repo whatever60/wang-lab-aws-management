@@ -220,13 +220,19 @@ SSH/user identity and Slurm logs provide the actual job submitter. EC2 instance-
 ARNs do not identify the individual user behind scheduler-driven launches. This package
 does not implement Slurm job-cost allocation.
 
-## Retained storage
+## Test and retained storage
 
-Production manifests now default both EFS and FSx to `Retain`. Deleting the cluster
-preserves storage according to its **deployed** configuration; changing a local manifest
-does not retroactively change an older cluster's deletion policy. Retained storage is
-not automatically reattached by a newly generated cluster; explicitly reuse the saved
-filesystem IDs when rebuilding. FSx scratch storage still needs a durable S3 archive.
+The committed pre-alpha test manifest explicitly uses `purpose=test`,
+`allow_cleanup=true`, and `Delete` for both EFS and FSx. A successful normal CloudFormation
+cluster deletion removes its owned filesystems even without `--cleanup-storage`; the
+separate cleanup action is only an explicit fallback for matching residual test storage.
+Keep durable data in S3 before deleting a test cluster.
+
+Future production use requires an ignored local override with both filesystems set to
+`Retain`, `purpose=production` and `allow_cleanup=false`. The **deployed** configuration
+controls deletion; changing a local manifest does not retroactively update an existing
+cluster's policy. Retained storage is not automatically reattached by a newly generated
+cluster; explicitly reuse the saved filesystem IDs when rebuilding.
 
 `delete-cluster` does not invoke storage cleanup by default. Explicit cleanup requires
 all of: an administrator's test manifest with `purpose=test`, `allow_cleanup=true`, both

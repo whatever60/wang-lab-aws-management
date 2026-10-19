@@ -1,95 +1,158 @@
-# Proposed Member EC2 Access
+# Member EC2 Access
 
-This is a migration proposal, not an applied policy. Replace broad member EC2,
-ELB, Auto Scaling, and CloudWatch permissions only after existing personal and
-shared workloads have explicit ownership. Administrators must choose approved
-regions, instance types, project memberships, role ARNs, and budget thresholds;
-this note does not select those values.
+`aws_audit.ec2_access` builds complete IAM documents offline. Deployment is a
+separate administrative operation: replace `AmazonEC2FullAccess` on the member
+group with **every** generated document. Keep existing S3, password, and EBS
+policies. A narrower Allow beside EC2FullAccess is not an effective restriction.
+Do not attach these member Denies to the admin group.
 
-## Access Rules
+## Policy Contract
 
-- **Trusted ownership:** use `Owner=<exact IAM username>` and `Project=<approved
-  project identifier>` on instances and their volumes, snapshots, images, network
-  interfaces, and other supported billable resources. For IAM users, own-resource
-  permissions can compare `aws:ResourceTag/Owner` with `${aws:username}`. Give
-  shared-project access through a separately approved project role or statement;
-  matching a freely chosen Project tag is not membership. Protect IAM principal
-  tags, role trust, and `sts:TagSession` from member-controlled changes. Federated
-  and service identities need an administrator-controlled principal-tag mapping
-  instead of assuming `${aws:username}` exists. [AWS ownership example](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_examples_ec2_tag-owner.html)
-- **Tags at creation, protected afterwards:** require the caller's exact Owner
-  and an authorized Project using `aws:RequestTag` on each supported create API.
-  Require both keys and exact key casing with `aws:TagKeys`; an allowed-key list
-  alone does not require tags. Permit protected `CreateTags` only during approved
-  creation through `ec2:CreateAction`. Explicitly deny subsequent changes/deletion
-  of Owner or Project, including spelling/case variants, except through a trusted
-  administrative migration path. Otherwise a member could claim another resource
-  or select an unauthorized project. [AWS tagging authorization](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/supported-iam-actions-tagging.html)
-- **Separate inventory from mutation:** allow the Describe actions actually
-  needed by the console/CLI, generally on `Resource="*"`. Inventory visibility
-  can include other users' resource metadata; it must not imply mutation access.
-  Allow explicitly selected lifecycle operations only on owned or authorized
-  project resources. Check every participating resource for multi-resource
-  operations such as volume attachment, copy, and launch; checking only the
-  instance is insufficient. [EC2 authorization reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_ec2.html)
-- **Constrain launches and resizing:** apply approved-region and instance-type
-  allowlists to supported API/resource combinations. Cover RunInstances, instance
-  type modification, launch templates, Spot/Fleet, and every allowed service that
-  can launch capacity. Split RunInstances authorization across instances, volumes,
-  approved AMIs, subnets, security groups, keys, and interfaces; do not apply an
-  instance-only condition indiscriminately to all of them. Preserve the current
-  explicit deny for per-volume EBS size **over 1024 GiB**, including supported
-  create/resize paths. This is neither total storage nor a spend cap. [AWS launch-policy examples](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ExamplePolicies_EC2.html)
-- **Close alternate paths:** ordinary members should use approved networking;
-  reserve shared security-group changes, public ingress, EIP allocation, ELB,
-  ASG, and unrestricted Fleet/launch-template administration for trusted operators
-  until equivalent controls exist. Remove inherited broad allows that bypass the
-  new rules, including the corresponding CloudWatch/service permissions. Permit
-  `iam:PassRole` only for named least-privilege instance roles and
-  `iam:PassedToService=ec2.amazonaws.com`; do not rely on role tags for PassRole.
-  Prevent unrestricted profile reassociation, IAM policy/trust edits, AssumeRole,
-  and SSM/automation paths that confer stronger infrastructure permissions.
-  [AWS PassRole guidance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_passrole.html)
+Members retain `ec2:Describe*` inventory in every region. In approved regions,
+they can start, stop, reboot, and terminate their own instances; attach/detach
+their own volumes to/from their own instances; delete/modify their own volumes;
+and use/delete their own EC2 keys. Ownership is
+`ec2:ResourceTag/Owner = ${aws:username}` for **IAM users**. Untagged or differently
+owned resources fail closed. Project tags never establish shared membership.
 
-## Migration Without Interrupting Existing Work
+New launches use exact approved AMIs, their reviewed backing snapshots, subnets,
+and security groups. Administrators approve those inputs, including image
+publisher and data contents; the builder cannot verify provenance offline.
+Members import their own public key with `ImportKeyPair`, retain the private key
+locally, and use SSH. Every new instance, volume, network interface, and imported
+key requires **Owner = exact IAM username**, **Project = personal**. Only the
+optional Name tag is also permitted, with exact key spelling. Members may update
+only the descriptive Name tag on their owned instances, volumes, interfaces,
+and keys. Owner, Project, all other tags, and tag deletion remain protected.
+[AWS tagging authorization](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/supported-iam-actions-tagging.html)
 
-1. Inventory effective user/group/role policies, resource dependencies, active
-   jobs, and ownership gaps. Confirm owners with the responsible people; do not
-   derive authority from an old Name tag or grant every member a shared project.
-2. Administrators tag existing resources and record project memberships. Put
-   unresolved/shared infrastructure behind explicit, reviewed resource exceptions
-   with an owner and expiry. Keep a restricted administrative recovery path.
-3. Build the complete candidate policy and test a pilot identity against tagged
-   fixtures. Check all required actions/condition keys in the authorization
-   reference. Tagging and allowed workflows must work before enforcement; merely
-   attaching a narrower Allow alongside AmazonEC2FullAccess does not restrict it.
-4. Migrate in stages, replacing conflicting broad grants only after each cohort
-   passes acceptance. Watch authorization failures and CloudTrail, preserve policy
-   versions for rollback, then retire temporary exceptions. This proposal changes
-   neither existing AWS permissions nor S3 access.
+RunInstances checks each participating resource separately. It denies existing
+ENI reuse, unapproved image/snapshot/network resources, launch templates, Spot,
+dedicated tenancy, and instance profiles. Blank extra volumes are allowed;
+snapshot-backed launch volumes require an approved backing snapshot. Standalone
+CreateVolume permits blank volumes only. Both sides of AttachVolume/DetachVolume
+must be owned. Snapshot/image creation, copying, registration, sharing, imports,
+and direct EBS block APIs are administrator-only to prevent cross-member data
+access. New-resource tags never authorize claiming existing resources.
+[AWS multi-resource semantics](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/iam-policies-for-amazon-ec2.html),
+[EC2 action/resource reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_ec2.html)
 
-## Acceptance Matrix
+RunInstances and StartInstances enforce the approved instance-type list.
+Instance resize, user-data edits, metadata/profile changes, shared SG/network/EIP
+changes, Fleet, launch templates, ELB, and Auto Scaling are administrator-only.
+Explicit Denies reject other EC2 APIs even against competing broad Allows. The
+bundle also denies PassRole, new service-linked roles, role assumption/session
+tagging, principal-tag edits, all SSM APIs, EC2 Instance Connect, and alarm/metric
+writes that could start or recover infrastructure. It grants
+no other service permissions. Administrators retain separate permissions.
+[AWS PassRole requirements](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_passrole.html)
 
-Use `simulate-custom-policy`/`simulate-principal-policy` with realistic principal,
-request, resource, region, and tag context. Repeat deny cases with a competing
-broad Allow to test intended guardrails, then use API DryRun where supported and
-small disposable fixtures for real authorization checks.
+The existing **1024 GiB per-volume** creation/resize Deny is retained and repeated
+in the bundle. It never applies to StartInstances or normal attachment of a
+legacy large volume. It does not cap aggregate disk usage, IOPS, throughput,
+instance count, runtime, or spend. AWS Budgets notifications/actions are delayed;
+a hard member allocation requires a broker or scheduler and removal of direct
+launch/start bypasses.
+[AWS budget limitations](https://docs.aws.amazon.com/cost-management/latest/userguide/bcm-lite-view-budget.html)
 
-| Scenario | Required result |
+## Build a Reviewed Candidate
+
+Keep live configuration and generated documents outside tracked source. JSON
+configuration requires these fields; no infrastructure is inferred:
+
+| Field | Administrative input |
 | --- | --- |
-| Approved launch, Owner=self, authorized Project; all required resource tags | Allowed |
-| Missing/forged Owner, unauthorized Project, or tag-key case variant | Denied |
-| Own lifecycle action; other user's action; explicit shared-project action | Allowed; denied; allowed only for that membership |
-| Overwrite/delete protected tags or self-edit principal/session project tags | Denied |
-| Wrong region/type; larger type via modify/template/Fleet/ASG | Denied |
-| Supported EBS create/resize at 1024 GiB; above 1024 GiB | Size guardrail permits boundary; denies excess |
-| Unapproved PassRole/profile, shared SG ingress, EIP, ELB/ASG or SSM bypass | Denied |
-| Required inventory; existing migrated shared workflow; unrelated S3 behavior | Preserved |
+| `account_id` | Exact commercial AWS account ID |
+| `regions` | Approved mutation regions; normally `us-east-1` |
+| `instance_types` | Exact approved types, including migrated existing types |
+| `approved_image_arns` | Exact AMI ARNs, empty account component |
+| `approved_snapshot_arns` | Reviewed AMI backing-snapshot ARNs, empty account component |
+| `approved_subnet_arns` | Exact approved public subnets for SSH onboarding |
+| `approved_security_group_arns` | Administrator-managed SSH SGs; members cannot edit ingress |
+| `shared_grants` | Optional reviewed existing-instance lifecycle exceptions |
 
-Activate Owner/Project cost-allocation reporting and agree alerts separately.
-AWS Budgets is delayed and notifications/actions are not a hard spend ceiling.
-For enforceable member allocations, route launch/start/resize through a broker or
-scheduler that reserves capacity and enforces concurrency, runtime, and storage
-limits; remove direct bypass permissions. Retained disks, snapshots, network
-charges, and billing delay still prevent a simple guarantee of an exact final
-dollar bill. [AWS budget timing and overspend limitations](https://docs.aws.amazon.com/cost-management/latest/userguide/bcm-lite-view-budget.html)
+Each shared grant contains `resource_arn`, `principal_arns`, `actions`,
+`expires_at`, and `reason`. Use an exact same-account instance ARN and IAM user
+ARNs; select only StartInstances, StopInstances, and/or RebootInstances; provide
+an explicit UTC expiry, e.g. `2027-01-01T00:00:00Z`. Resolve any project group
+membership administratively into these exact principals. The grant does not
+authorize termination, disks, key use, launches, or tag edits. Expired grants deny
+foreign access even against a broad Allow. A genuine owner's normal permission
+survives expiry. Unresolved resources remain administrator-controlled.
+
+```bash
+umask 077
+PYTHONPATH=src python -m aws_audit.ec2_access /private/reviewed-member-ec2.json > /private/member-ec2-policies.json
+```
+
+Output maps managed-policy names to complete documents, deterministically split
+below IAM's 6144-character limit. Attach the **complete bundle together**; the
+split only serves IAM size limits. The builder rejects more than six generated
+attachments, leaving room for existing group policies under the default quota.
+It makes no AWS calls, resolves no AMIs, and performs no deployment or tagging.
+
+Generate a compliant launch request from the same reviewed configuration. This
+offline helper selects approved sources and emits all three destination tag
+sets, without instance profiles, templates, or existing interfaces:
+
+```bash
+PYTHONPATH=src python -m aws_audit.ec2_access.launch /private/reviewed-member-ec2.json --username Alice_User --key-name alice_key --instance-type t3.micro --name 'Alice console' > /private/launch.json
+aws ec2 run-instances --region us-east-1 --cli-input-json file:///private/launch.json --dry-run
+```
+
+Use an approved type and the exact caller username/owned imported key. The
+helper prints its selected region, sources, and example command to stderr;
+follow that region if the configuration contains several. Review the JSON and
+require a successful DryRun before an explicitly authorized real launch.
+
+## Migration and Acceptance
+
+1. Inventory effective policies in every enabled region, active workloads, SSH
+   paths, profiles, disks, and ownership evidence. Preserve running instances,
+   network rules, and data. Removing IAM management permissions does not stop
+   instances or invalidate existing SSH keys.
+2. Administrators confirm owners from authoritative evidence and set canonical
+   Owner/Project tags. Do not derive authority from Name tags, SSH key names, or
+   ambiguous display names. Review an existing profile before granting its owner
+   Start. Use exact expiring grants for reviewed migration cases; unresolved
+   shared infrastructure remains admin-only.
+3. Approve AMIs/root snapshots, common SSH SG, subnets, region, and types. Import
+   and tag a pilot public key. For RunInstances supply TagSpecifications for
+   **instance, volume, and network-interface**, each with Owner and Project.
+   The console's usual instance-only tags are insufficient; use a reviewed
+   CLI/SDK request.
+4. Simulate **all** documents with real per-resource context, then test with the
+   pilot's real credentials and `DryRun=True`: allowed requests return
+   `DryRunOperation`, forbidden requests `UnauthorizedOperation`. Decode denial
+   context to distinguish IAM denial from invalid input. Allow policy propagation
+   time. Offline or missing-context simulations do not prove launches work.
+5. Preserve previous policy versions and admin recovery. Attach the reviewed
+   complete bundle, detach EC2FullAccess, and recheck each member's effective
+   permissions, inventory, and mapped lifecycle actions. Do not stop/reboot active
+   workloads merely to validate this migration.
+
+| Acceptance case | Expected result |
+| --- | --- |
+| Approved launch, owned key, all three destination tag sets | Allowed on every participating resource |
+| Missing/forged Owner, non-personal Project, tag-key case variant | Explicit deny, even beside EC2FullAccess |
+| Update only Name on own resource; rename foreign or unowned resource | Allowed; explicit deny |
+| Direct Owner/Project/other tag update, lowercase name, or any tag deletion | Explicit deny, even beside EC2FullAccess |
+| Existing foreign ENI, private AMI/snapshot, wrong SG/subnet | Explicit deny; repeat as real RunInstances DryRun |
+| Own instance and own volume attachment; either resource foreign | Allowed; explicit deny |
+| Owned Start with existing disk larger than 1024 GiB | Allowed if region/type approved |
+| New/resize volume at 1024 GiB; 1025 GiB | Size guard permits boundary; explicit deny above it |
+| Exact shared principal/resource/action before expiry; wrong/expired grant | Allowed; explicit deny |
+| Wrong type/region, resize, LT/Fleet/ASG, PassRole/profile, SG/EIP mutation | Explicit deny |
+| Snapshot restore/copy, image registration, EBS block reads, SSM/Instance Connect | Explicit deny |
+| Existing S3/password behavior and administrator recovery | Preserved through separate policies |
+
+Offline regressions cover multi-resource decisions, deny precedence with a
+competing broad Allow, tag protection, exact grants/expiry, and legacy large-disk
+starts. AWS simulation and real DryRun remain deployment gates because an offline
+evaluator cannot establish which request/resource context EC2 actually supplies.
+Direct CreateTags needs an additional disposable-resource acceptance check:
+update only Name on an owned test key, then verify Owner/Project changes are
+denied. Live EC2 tagging authorization can expose an existing-resource context
+without request-tag keys, which the IAM simulator does not reproduce. Creation
+tag requirements therefore live on RunInstances/CreateVolume/ImportKeyPair;
+direct protected-tag Denies use requested tag keys and the trusted create action.

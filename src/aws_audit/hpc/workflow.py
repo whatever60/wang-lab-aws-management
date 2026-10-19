@@ -474,18 +474,13 @@ def provision_plan_commands(manifest: dict[str, Any]) -> list[tuple[str, list[st
     ]
     for command in slurm_submit_commands(manifest, True, True):
         commands.append(("submit Slurm smoke test", command))
-    commands.append(
-        (
-            "delete cluster (retained storage remains)",
-            [
-                "uv",
-                "run",
-                "aws-audit",
-                "hpc",
-                "delete-cluster",
-            ],
-        )
-    )
+    delete_command = ["uv", "run", "aws-audit", "hpc", "delete-cluster"]
+    if test_storage_cleanup_enabled(manifest):
+        delete_command.append("--cleanup-storage")
+        delete_label = "delete test cluster and explicitly tagged disposable storage"
+    else:
+        delete_label = "delete cluster using deployed storage policies"
+    commands.append((delete_label, delete_command))
     return commands
 
 
@@ -516,6 +511,7 @@ def print_describe(manifest: dict[str, Any], stream: TextIO) -> None:
         f"{guardrails['max_logins']} logins per user",
         file=stream,
     )
+    print(f"Storage purpose: {manifest['storage_management']['purpose']}", file=stream)
     print(f"/home: {decision['home_storage']} ({manifest['storage'][0]['deletion_policy']})", file=stream)
     print(f"/scratch: {decision['scratch_storage']} ({manifest['storage'][1]['deletion_policy']})", file=stream)
     print(f"Compute idle policy: {decision['compute_idle_policy']}", file=stream)
@@ -1176,12 +1172,22 @@ def delete_efs_file_system(manifest: dict[str, Any], file_system_id: str) -> Non
     )
 
 
-def cleanup_tagged_storage(manifest: dict[str, Any]) -> None:
-    """Delete tagged EFS and FSx storage left behind by test clusters."""
+def test_storage_cleanup_enabled(manifest: dict[str, Any]) -> bool:
+    """Only an explicit disposable-test policy permits the separate cleanup action."""
     policy = manifest.get("storage_management", {})
-    if (not policy.get("allow_cleanup", False) or policy.get("purpose") != "test"
-            or any(item["deletion_policy"] != "Delete" for item in manifest["storage"])):
+    return (policy.get("allow_cleanup") is True and policy.get("purpose") == "test"
+            and bool(manifest["storage"])
+            and all(item["deletion_policy"] == "Delete" for item in manifest["storage"]))
+
+
+def validate_storage_cleanup(manifest: dict[str, Any]) -> None:
+    if not test_storage_cleanup_enabled(manifest):
         raise ValueError("Storage cleanup requires an explicit test manifest, all Delete policies, and allow_cleanup=true")
+
+
+def cleanup_tagged_storage(manifest: dict[str, Any]) -> None:
+    """Delete only matching cluster/test/Delete-tagged residual test storage."""
+    validate_storage_cleanup(manifest)
     region = manifest["parallelcluster"]["region"]
     for file_system_id in tagged_fsx_ids(manifest):
         run_command(
@@ -1305,6 +1311,8 @@ def handle_render_provision_plan(args: argparse.Namespace) -> None:
     manifest = load_configured_manifest(args)
     for index, item in enumerate(provision_plan_commands(manifest), 1):
         label, command = item
+        if command[:4] == ["uv", "run", "aws-audit", "hpc"]:
+            command = [*command[:4], "--manifest", str(args.manifest), *command[4:]]
         print(f"# {index}. {label}")
         print_command(command)
         print("")
@@ -1348,6 +1356,8 @@ def handle_delete_cluster(args: argparse.Namespace) -> None:
     manifest = load_manifest(args.manifest)
     if args.cleanup_storage and not args.wait:
         raise ValueError("Storage cleanup requires waiting for cluster deletion")
+    if args.cleanup_storage:
+        validate_storage_cleanup(manifest)
     run_command(pcluster_delete_command(manifest))
     if args.wait:
         wait_for_cluster_absent(manifest, args.timeout_seconds)
@@ -1489,7 +1499,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     delete_parser = subparsers.add_parser(
         "delete-cluster",
-        help="Delete the cluster; preserve retained storage.",
+        help="Delete the cluster using deployed Delete/Retain policies; residual cleanup requires --cleanup-storage.",
     )
     delete_parser.add_argument("--no-wait", action="store_false", dest="wait")
     delete_parser.add_argument("--cleanup-storage", action="store_true", help="Also remove explicitly tagged disposable test storage.")

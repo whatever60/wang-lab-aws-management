@@ -2,7 +2,10 @@
 
 The HPC path uses AWS ParallelCluster with Slurm. The cluster has one combined
 head/login node, EFS for `/home`, FSx for Lustre SSD for `/scratch`, and Slurm compute
-resources with `MinCount: 0`.
+resources with `MinCount: 0`. This is a pre-alpha test workflow. The committed manifest
+explicitly uses `purpose=test` and disposable EFS/FSx storage with `DeletionPolicy=Delete`.
+Keep durable inputs and results in S3; test `/home` and `/scratch` are removed with the
+cluster. Stable UIDs, approved public-key pins and the user lifecycle checks still apply.
 
 ## Architecture Choice
 
@@ -87,11 +90,36 @@ Delete the cluster:
 uv run aws-audit hpc delete-cluster
 ```
 
-The production default is `Retain` for EFS and FSx; retained data is not automatically
-reattached to a replacement cluster. The actual deployed policy controls deletion.
-Storage cleanup is opt-in and requires a disposable test manifest and explicit matching
-resource tags. See the lifecycle guide before migrating an existing cluster or deleting
-storage.
+A successful normal CloudFormation deletion removes the cluster-owned EFS and FSx
+because the test manifest deploys `Delete` policies. This also happens without
+`--cleanup-storage`; that option is an additional fallback for matching residual test
+storage, not the mechanism that enables normal filesystem deletion.
+
+To explicitly include that fallback after waiting for cluster deletion:
+
+```bash
+uv run aws-audit hpc delete-cluster --cleanup-storage
+```
+
+Or run `uv run aws-audit hpc cleanup-storage` separately after deletion. It requires the
+explicit test settings `purpose=test`, `allow_cleanup=true` and both `Delete` policies,
+plus the matching cluster tag, `aws-audit:storage-purpose=test` and
+`aws-audit:storage-lifecycle=Delete` on each filesystem. Untagged or retained resources
+are not selected. Confirm cluster deletion completed and check for any residual tagged
+filesystems before ending a test, so an incomplete deletion does not keep billing.
+
+For future production use, copy the manifest to an ignored local file and explicitly
+set `storage_management.purpose=production`, `storage_management.allow_cleanup=false`,
+and both storage `deletion_policy` values to `Retain` before generating/deploying it:
+
+```bash
+uv run aws-audit hpc --manifest config/hpc.production.local.json generate-config
+```
+
+The actual **deployed** policy controls deletion; changing a local file does not update
+existing resources. A production override rejects test cleanup before issuing a cluster
+delete request. Retained data is not automatically reattached to a replacement cluster.
+See the lifecycle guide for the separate identity and migration requirements.
 
 ## Login Guardrails
 

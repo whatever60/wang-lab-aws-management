@@ -60,7 +60,14 @@ Typical scopes:
 
 - `User`: a user's own bucket.
 - `SharedOps`: shared operational data, writable by admins only.
-- `ServiceManaged`: service-owned delivery buckets, generally admin-only.
+- `ServiceManaged`: service or application buckets with their existing
+  access policies; administrators receive reads, while member-wide reads and the
+  `SharedOps` admin-write guardrail are not added.
+
+Choose by the bucket's actual use and access policy, not by whether its name
+contains a person's name. An application bucket already used by an instance role
+can use `ServiceManaged` without creating another role or changing that bucket
+policy. The reconciler preserves service-managed policies.
 
 The reconciler is intentionally explicit: ambiguous users or buckets should be fixed in
 the manifest instead of guessed.
@@ -90,5 +97,5 @@ version. A full reconciliation additionally affects the manifest's other policie
 tags, and bucket guardrails.
 
 `HpcUid` is managed separately in IAM. S3 reconciliation preserves it, including
-when a member's role changes. Explicit UID removal during offboarding remains a
-separate lifecycle step.
+when a member's role changes. Retain historical UID allocations during offboarding
+and never assign them to another person.

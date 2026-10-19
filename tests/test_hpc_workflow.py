@@ -1,4 +1,5 @@
 import json
+import io
 import subprocess
 import sys
 import tempfile
@@ -83,16 +84,74 @@ class AwsHpcWorkflowTest(unittest.TestCase):
         self.assertEqual(arm_manifest["ec2_selection"]["cluster_architecture"], "arm64")
         self.assertEqual(hpc_workflow.head_node_instance_type(arm_manifest), "r7g.xlarge")
 
-    def test_manifest_uses_iam_groups_and_retains_production_storage(self) -> None:
-        """IAM selection and storage policies retain production data by default."""
+    def test_manifest_uses_iam_groups_and_disposable_test_storage(self) -> None:
+        """The pre-alpha manifest explicitly opts into disposable test storage."""
         manifest = hpc_workflow.load_manifest(
             Path("config/hpc_workflow_manifest.json")
         )
         self.assertEqual(manifest["iam_user_selection"]["include_groups"], ["lab_members", "admin"])
         self.assertEqual(manifest["iam_user_selection"]["exclude_users"], [])
         self.assertEqual(manifest["iam_user_selection"]["uid_tag"], "HpcUid")
-        self.assertEqual(manifest["storage"][0]["deletion_policy"], "Retain")
-        self.assertEqual(manifest["storage"][1]["deletion_policy"], "Retain")
+        self.assertEqual(manifest["storage"][0]["deletion_policy"], "Delete")
+        self.assertEqual(manifest["storage"][1]["deletion_policy"], "Delete")
+        self.assertEqual(manifest["storage_management"], {"purpose": "test", "allow_cleanup": True})
+
+    def test_production_override_retains_storage_and_rejects_cleanup_before_mutation(self) -> None:
+        """A local production override remains supported and cannot request test cleanup."""
+        manifest = hpc_workflow.load_manifest(Path("config/hpc_workflow_manifest.json"))
+        manifest["storage_management"] = {"purpose": "production", "allow_cleanup": False}
+        for item in manifest["storage"]:
+            item["deletion_policy"] = "Retain"
+        storage = hpc_workflow.shared_storage_config(manifest)
+        self.assertEqual(storage[0]["EfsSettings"]["DeletionPolicy"], "Retain")
+        self.assertEqual(storage[1]["FsxLustreSettings"]["DeletionPolicy"], "Retain")
+        args = hpc_workflow.build_parser().parse_args(["delete-cluster", "--cleanup-storage"])
+        with mock.patch.object(hpc_workflow, "load_manifest", return_value=manifest), \
+                mock.patch.object(hpc_workflow, "run_command") as mutate:
+            with self.assertRaisesRegex(ValueError, "explicit test manifest"):
+                hpc_workflow.handle_delete_cluster(args)
+        mutate.assert_not_called()
+        self.assertNotIn("--cleanup-storage", hpc_workflow.provision_plan_commands(manifest)[-1][1])
+
+    def test_test_deletion_has_explicit_residual_cleanup_and_matching_resource_tags(self) -> None:
+        """Normal CFN Delete removes test storage; fallback cleanup is separately explicit."""
+        manifest = hpc_workflow.load_manifest(Path("config/hpc_workflow_manifest.json"))
+        self.assertFalse(hpc_workflow.build_parser().parse_args(["delete-cluster"]).cleanup_storage)
+        self.assertIn("--cleanup-storage", hpc_workflow.provision_plan_commands(manifest)[-1][1])
+        args = hpc_workflow.build_parser().parse_args(["delete-cluster"])
+        with mock.patch.object(hpc_workflow, "load_manifest", return_value=manifest), \
+                mock.patch.object(hpc_workflow, "run_command") as delete, \
+                mock.patch.object(hpc_workflow, "wait_for_cluster_absent"), \
+                mock.patch.object(hpc_workflow, "cleanup_tagged_storage") as fallback:
+            hpc_workflow.handle_delete_cluster(args)
+        delete.assert_called_once_with(hpc_workflow.pcluster_delete_command(manifest))
+        fallback.assert_not_called()
+        with mock.patch.object(hpc_workflow, "run_json", return_value=[]) as read:
+            hpc_workflow.cleanup_tagged_storage(manifest)
+        for call in read.call_args_list:
+            query = call.args[0][call.args[0].index("--query") + 1]
+            self.assertIn("parallelcluster:cluster-name", query)
+            self.assertIn("aws-audit:storage-purpose", query)
+            self.assertIn("aws-audit:storage-lifecycle", query)
+
+    def test_rendered_provision_plan_preserves_explicit_local_manifest(self) -> None:
+        """A copied production override must survive every rendered package command."""
+        manifest = hpc_workflow.load_manifest(Path("config/hpc_workflow_manifest.json"))
+        manifest["storage_management"] = {"purpose": "production", "allow_cleanup": False}
+        for item in manifest["storage"]:
+            item["deletion_policy"] = "Retain"
+        args = hpc_workflow.build_parser().parse_args([
+            "--manifest", "config/hpc.production.local.json", "render-provision-plan"])
+        with mock.patch.object(hpc_workflow, "load_configured_manifest", return_value=manifest), \
+                mock.patch.object(hpc_workflow, "print_command") as output, \
+                mock.patch.object(sys, "stdout", new=io.StringIO()):
+            hpc_workflow.handle_render_provision_plan(args)
+        package_commands = [call.args[0] for call in output.call_args_list
+                            if call.args[0][:4] == ["uv", "run", "aws-audit", "hpc"]]
+        self.assertEqual(len(package_commands), 3)
+        for command in package_commands:
+            self.assertEqual(command[4:6], ["--manifest", "config/hpc.production.local.json"])
+            self.assertNotIn("--cleanup-storage", command)
 
     def test_manifest_includes_arm_and_small_instances_in_catalog_policy(self) -> None:
         """The catalog policy includes ARM and tiny on-demand Linux instance families."""
@@ -153,7 +212,7 @@ class AwsHpcWorkflowTest(unittest.TestCase):
         self.assertNotIn("Alumni_User", [user["iam_user"] for user in users])
 
     def test_generated_cluster_config_contains_core_shape(self) -> None:
-        """Generated config uses one head/login node, retained storage, and generated queues."""
+        """Generated test config uses one head/login node, disposable storage, and generated queues."""
         manifest = hpc_workflow.load_manifest(
             Path("config/hpc_workflow_manifest.json")
         )
@@ -199,7 +258,10 @@ class AwsHpcWorkflowTest(unittest.TestCase):
 
         self.assertIn("HeadNode", config)
         self.assertNotIn("LoginNodes", config)
-        self.assertEqual(config["SharedStorage"][0]["EfsSettings"]["DeletionPolicy"], "Retain")
+        self.assertEqual(config["SharedStorage"][0]["EfsSettings"]["DeletionPolicy"], "Delete")
+        self.assertEqual(config["SharedStorage"][1]["FsxLustreSettings"]["DeletionPolicy"], "Delete")
+        self.assertIn({"Key": "aws-audit:storage-purpose", "Value": "test"}, config["Tags"])
+        self.assertIn({"Key": "aws-audit:storage-lifecycle", "Value": "Delete"}, config["Tags"])
         self.assertEqual(
             config["HeadNode"]["CustomActions"]["OnNodeStart"]["Args"],
             [

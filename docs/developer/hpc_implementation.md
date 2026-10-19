@@ -80,4 +80,20 @@ PYTHONPATH=src python -m unittest discover -s tests -p 'test_hpc*.py'
 
 The filesystem/command tests simulate enrollment, revocation, migration conflicts,
 checksum/version validation, concurrent publication protection, S3 outages, targeted
-rollback, future-node hooks and retained-storage cleanup guards.
+rollback, future-node hooks and test-deletion/production-retention cleanup guards.
+
+
+## Disposable test storage
+
+The committed manifest is a pre-alpha test configuration: EFS and FSx use `Delete`,
+with `storage_management.purpose=test` and `allow_cleanup=true`. Successful normal
+CloudFormation deletion removes the owned filesystems without an extra cleanup action.
+`delete-cluster --cleanup-storage` and `cleanup-storage` explicitly request the fallback;
+it selects only filesystems with the cluster/test/Delete tag combination. The rendered
+test plan shows that explicit flag and preserves the selected manifest path.
+
+For future production use, an ignored local override must select `purpose=production`,
+`allow_cleanup=false` and `Retain` for both filesystems. Cleanup eligibility is validated
+before a combined delete/cleanup request can issue any deletion command. Identity UID,
+public-key approval, target trust and account synchronization checks are independent of
+this test-storage choice and remain enabled.

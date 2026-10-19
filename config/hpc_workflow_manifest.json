@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "name": "lab-parallelcluster-hpc",
   "decision": {
     "scheduler": "aws-parallelcluster-slurm",
@@ -55,18 +55,18 @@
       "name": "home",
       "storage_type": "Efs",
       "mount_dir": "/home",
-      "role": "retained shared home directories",
-      "deletion_policy": "Retain"
+      "role": "disposable shared home directories for test clusters",
+      "deletion_policy": "Delete"
     },
     {
       "name": "scratch",
       "storage_type": "FsxLustre",
       "mount_dir": "/scratch",
-      "role": "high-throughput active scratch space",
+      "role": "disposable high-throughput test scratch space",
       "storage_capacity_gib": 1200,
       "deployment_type": "SCRATCH_2",
       "fsx_storage_type": "SSD",
-      "deletion_policy": "Retain"
+      "deletion_policy": "Delete"
     }
   ],
   "slurm": {
@@ -201,7 +201,7 @@
     }
   },
   "storage_management": {
-    "purpose": "production",
-    "allow_cleanup": false
+    "purpose": "test",
+    "allow_cleanup": true
   }
 }
