@@ -105,6 +105,39 @@ helper prints its selected region, sources, and example command to stderr;
 follow that region if the configuration contains several. Review the JSON and
 require a successful DryRun before an explicitly authorized real launch.
 
+## Launch from the AWS Console
+
+The EC2 console launch wizard can submit the required tags for instances,
+volumes, and network interfaces. Members can use it directly; the CLI helper
+is optional. Merely entering an instance Name does not supply the ownership
+tags required by this policy.
+
+1. Choose an approved region, exact approved AMI, and approved instance type.
+   The console can display choices that the policy will reject; it does not
+   filter its catalog to this configuration's allowlists. Select an AMI by its
+   reviewed ID rather than a Systems Manager parameter, because member SSM
+   access is denied.
+2. Under **Name and tags → Add additional tags**, add `Owner` with the exact
+   IAM username, such as `Alice_User`, and `Project` with the value `personal`.
+   For **each** tag, select all three resource types: **Instances, Volumes,
+   Network interfaces**. The optional `Name` tag is also allowed. Other tag
+   keys are denied.
+3. Select the member's existing owned key pair. Under **Network settings**,
+   choose an approved existing subnet and administrator-managed security
+   group; leave the network interface as **New interface**. Enable a public
+   IPv4 address when using public SSH. Creating a new key pair or security
+   group inside the launch wizard is not allowed by this member policy.
+4. Use on-demand/default tenancy, no instance profile or launch template, and
+   keep every EBS volume at or below 1024 GiB. Review the request before
+   choosing **Launch instance**.
+
+These steps map the console fields to the same request constraints exercised
+by the CLI/SDK DryRun checks. A successful API DryRun does not establish that
+the interactive console workflow has been tested with a member account.
+Existing owned instances can still be started and stopped from the console
+without adding request tags again.
+[AWS console parameter reference](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-launch-parameters.html)
+
 ## Migration and Acceptance
 
 1. Inventory effective policies in every enabled region, active workloads, SSH
@@ -119,8 +152,8 @@ require a successful DryRun before an explicitly authorized real launch.
 3. Approve AMIs/root snapshots, common SSH SG, subnets, region, and types. Import
    and tag a pilot public key. For RunInstances supply TagSpecifications for
    **instance, volume, and network-interface**, each with Owner and Project.
-   The console's usual instance-only tags are insufficient; use a reviewed
-   CLI/SDK request.
+   The console supports all three resource types under Add additional tags;
+   select them for both mandatory tags. The CLI/SDK helper is an alternative.
 4. Simulate **all** documents with real per-resource context, then test with the
    pilot's real credentials and `DryRun=True`: allowed requests return
    `DryRunOperation`, forbidden requests `UnauthorizedOperation`. Decode denial
