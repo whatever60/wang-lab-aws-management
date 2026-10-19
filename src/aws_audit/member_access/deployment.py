@@ -5,12 +5,11 @@ import re
 from typing import Any, Dict
 
 from .models import COMPONENT, MANAGED_BY, ROLE_PATH, USER_TAG_KEYS
-from .runtime import HANDLER, IAM_EVENTS, validate_runtime_config
+from .runtime import CONFIG_ENV, HANDLER, IAM_EVENTS, validate_runtime_config
 
 
 BOUNDARY_NAME = "WangLabMemberS3Boundary"
 FUNCTION_NAME = "wanglab-member-access-sync"
-CONFIG_PARAMETER = "/wanglab/member-access/config"
 
 
 def data_boundary(account_id: str) -> Dict[str, Any]:
@@ -112,48 +111,36 @@ def cloudformation_template(config: dict, *, artifact_bucket: str, artifact_key:
     if config["permissions_boundary_arn"] != boundary:
         raise ValueError("runtime boundary must be the stack-managed data boundary")
     serialized = json.dumps(config, separators=(",", ":"), sort_keys=True)
-    if len(serialized.encode()) > 8192:
-        raise ValueError("approved configuration exceeds the SSM Advanced parameter limit")
+    if len(CONFIG_ENV.encode()) + len(serialized.encode()) > 4096:
+        raise ValueError("approved configuration exceeds Lambda's 4 KB environment limit")
     tags = [{"Key": "ManagedBy", "Value": MANAGED_BY}, {"Key": "Component", "Value": COMPONENT}]
     permissions = runtime_permissions(account, region, boundary)
     permissions["Statement"].extend([
-        {"Sid": "ReadApprovedConfigOnly", "Effect": "Allow", "Action": "ssm:GetParameter",
-         "Resource": "arn:aws:ssm:%s:%s:parameter%s" % (region, account, CONFIG_PARAMETER)},
         {"Sid": "WriteOwnLogs", "Effect": "Allow", "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
          "Resource": {"Fn::GetAtt": ["Logs", "Arn"]}},
-        {"Sid": "SendFailureRecord", "Effect": "Allow", "Action": "sqs:SendMessage", "Resource": {"Fn::GetAtt": ["Failures", "Arn"]}},
     ])
     resources: Dict[str, Any] = {
         "Boundary": {"Type": "AWS::IAM::ManagedPolicy", "DeletionPolicy": "Retain", "UpdateReplacePolicy": "Retain", "Properties": {"ManagedPolicyName": BOUNDARY_NAME, "PolicyDocument": data_boundary(account)}},
-        "Config": {"Type": "AWS::SSM::Parameter", "Properties": {"Name": CONFIG_PARAMETER, "Type": "String", "Value": serialized,
-            "Tier": "Advanced" if len(serialized.encode()) > 4096 else "Standard", "Tags": {"ManagedBy": MANAGED_BY, "Component": COMPONENT}}},
         "Logs": {"Type": "AWS::Logs::LogGroup", "Properties": {"LogGroupName": "/aws/lambda/" + FUNCTION_NAME, "RetentionInDays": 30, "Tags": tags}},
-        "Failures": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "wanglab-member-access-failures", "MessageRetentionPeriod": 1209600,
-            "SqsManagedSseEnabled": True, "Tags": tags}},
         "RuntimeRole": {"Type": "AWS::IAM::Role", "Properties": {"RoleName": "WangLabMemberAccessSync", "Tags": tags,
             "AssumeRolePolicyDocument": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"}, "Action": "sts:AssumeRole"}]},
             "Policies": [{"PolicyName": "MemberLifecycleMetadata", "PolicyDocument": permissions}]}},
-        "Function": {"Type": "AWS::Lambda::Function", "DependsOn": ["Boundary", "Config", "Logs"], "Properties": {
+        "Function": {"Type": "AWS::Lambda::Function", "DependsOn": ["Boundary", "Logs"], "Properties": {
             "FunctionName": FUNCTION_NAME, "Runtime": "python3.12", "Handler": HANDLER, "Role": {"Fn::GetAtt": ["RuntimeRole", "Arn"]},
             "Code": {"S3Bucket": artifact_bucket, "S3Key": artifact_key}, "Timeout": 900, "MemorySize": 256, "ReservedConcurrentExecutions": 1,
-            "Environment": {"Variables": {"WANGLAB_MEMBER_ACCESS_CONFIG": CONFIG_PARAMETER}}, "DeadLetterConfig": {"TargetArn": {"Fn::GetAtt": ["Failures", "Arn"]}}, "Tags": tags}},
-        "Retry": {"Type": "AWS::Lambda::EventInvokeConfig", "Properties": {"FunctionName": {"Ref": "Function"}, "Qualifier": "$LATEST", "MaximumRetryAttempts": 2, "MaximumEventAgeInSeconds": 3600}},
+            "Environment": {"Variables": {CONFIG_ENV: serialized}}, "Tags": tags}},
         "Errors": {"Type": "AWS::CloudWatch::Alarm", "Properties": {"AlarmName": "wanglab-member-access-errors", "Namespace": "AWS/Lambda", "MetricName": "Errors",
             "Dimensions": [{"Name": "FunctionName", "Value": {"Ref": "Function"}}], "Statistic": "Sum", "Period": 60, "EvaluationPeriods": 1,
             "Threshold": 1, "ComparisonOperator": "GreaterThanOrEqualToThreshold", "TreatMissingData": "notBreaching"}},
     }
-    for logical, properties in {
-        "IdentityChanges": {"Name": "wanglab-member-access-identity", "EventPattern": {"source": ["aws.iam"], "detail-type": ["AWS API Call via CloudTrail"],
-            "detail": {"eventSource": ["iam.amazonaws.com"], "eventName": list(IAM_EVENTS)}}},
-        "Periodic": {"Name": "wanglab-member-access-periodic", "ScheduleExpression": "rate(5 minutes)"},
-    }.items():
-        resources[logical] = {"Type": "AWS::Events::Rule", "Properties": {**properties, "State": "ENABLED", "Targets": [{"Id": "MemberAccess",
-            "Arn": {"Fn::GetAtt": ["Function", "Arn"]}, "DeadLetterConfig": {"Arn": {"Fn::GetAtt": ["Failures", "Arn"]}}}]}}
-        resources[logical + "Permission"] = {"Type": "AWS::Lambda::Permission", "Properties": {"Action": "lambda:InvokeFunction", "FunctionName": {"Ref": "Function"},
-            "Principal": "events.amazonaws.com", "SourceArn": {"Fn::GetAtt": [logical, "Arn"]}, "SourceAccount": account}}
-    resources["FailuresPolicy"] = {"Type": "AWS::SQS::QueuePolicy", "Properties": {"Queues": [{"Ref": "Failures"}], "PolicyDocument": {
-        "Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": {"Service": "events.amazonaws.com"}, "Action": "sqs:SendMessage",
-            "Resource": {"Fn::GetAtt": ["Failures", "Arn"]}, "Condition": {"ArnEquals": {"aws:SourceArn": [{"Fn::GetAtt": ["IdentityChanges", "Arn"]}, {"Fn::GetAtt": ["Periodic", "Arn"]}]}, "StringEquals": {"aws:SourceAccount": account}}}]}}}
+    resources["IdentityChanges"] = {"Type": "AWS::Events::Rule", "Properties": {
+        "Name": "wanglab-member-access-identity", "State": "ENABLED", "ScheduleExpression": "rate(5 minutes)",
+        "EventPattern": {"source": ["aws.iam"], "detail-type": ["AWS API Call via CloudTrail"],
+                         "detail": {"eventSource": ["iam.amazonaws.com"], "eventName": list(IAM_EVENTS)}},
+        "Targets": [{"Id": "MemberAccess", "Arn": {"Fn::GetAtt": ["Function", "Arn"]}}]}}
+    resources["IdentityChangesPermission"] = {"Type": "AWS::Lambda::Permission", "Properties": {
+        "Action": "lambda:InvokeFunction", "FunctionName": {"Ref": "Function"}, "Principal": "events.amazonaws.com",
+        "SourceArn": {"Fn::GetAtt": ["IdentityChanges", "Arn"]}, "SourceAccount": account}}
     return {"AWSTemplateFormatVersion": "2010-09-09", "Description": "Managed personal EC2 launch templates and S3-only roles with membership-driven revocation",
-            "Resources": resources, "Outputs": {"FunctionName": {"Value": {"Ref": "Function"}}, "ConfigParameter": {"Value": {"Ref": "Config"}},
-                "BoundaryArn": {"Value": {"Ref": "Boundary"}}, "FailureQueueUrl": {"Value": {"Ref": "Failures"}}}}
+            "Resources": resources, "Outputs": {"FunctionName": {"Value": {"Ref": "Function"}},
+                "BoundaryArn": {"Value": {"Ref": "Boundary"}}}}

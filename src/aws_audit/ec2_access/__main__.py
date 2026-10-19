@@ -13,7 +13,10 @@ def main() -> None:
     parser.add_argument("config", type=Path)
     args = parser.parse_args()
     try:
-        config = config_from_mapping(json.loads(args.config.read_text(encoding="utf-8")))
+        value = json.loads(args.config.read_text(encoding="utf-8"))
+        if isinstance(value, dict):
+            value = value.get("ec2_config", value)
+        config = config_from_mapping(value)
         bundle = build_policy_bundle(config)
     except (OSError, ValueError, TypeError) as exc:
         parser.error(str(exc))

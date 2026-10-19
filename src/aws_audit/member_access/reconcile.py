@@ -658,4 +658,10 @@ def reconcile(iam: Any, ec2_by_region: Mapping[str, Any], config: MemberLaunchCo
               s3: Any = None, execute: bool = False) -> dict:
     """Preview by default; runtime can execute a freshly captured guarded plan."""
     preview = plan(config, snapshot(iam, ec2_by_region, config, s3=s3))
-    return apply_plan(iam, ec2_by_region, config, preview, s3=s3) if execute else preview
+    if not execute:
+        return preview
+    if not preview["operations"]:
+        # There is nothing to authorize or mutate. The runtime still rechecks
+        # membership after this pass; a second full resource scan buys nothing.
+        return {"plan": preview, "applied": [], "errors": preview["resource_read_errors"], "counts": preview["counts"]}
+    return apply_plan(iam, ec2_by_region, config, preview, s3=s3)

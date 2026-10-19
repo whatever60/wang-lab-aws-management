@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -6,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from pathlib import Path
 from typing import Any
 
 EVENT_PATTERN = {
@@ -1010,48 +1013,56 @@ def parse_args() -> argparse.Namespace:
         help="Which setup block to run.",
     )
 
-    parser.add_argument("--alert-destination", choices=["email", "slack"], default="email")
-    parser.add_argument("--email-endpoint", default="")
+    parser.add_argument("--alert-destination", choices=["email", "slack"], default=os.environ.get('ALERT_DESTINATION', "email"))
+    parser.add_argument("--email-endpoint", default=os.environ.get('EMAIL_ENDPOINT', ""))
 
-    parser.add_argument("--base-region", default="us-east-1")
-    parser.add_argument("--target-regions", default="")
+    parser.add_argument("--base-region", default=os.environ.get('BASE_REGION', "us-east-1"))
+    parser.add_argument("--target-regions", default=os.environ.get('TARGET_REGIONS', ""))
 
-    parser.add_argument("--trail-name", default="account-audit-trail")
-    parser.add_argument("--trail-bucket", default="")
+    parser.add_argument("--trail-name", default=os.environ.get('TRAIL_NAME', "account-audit-trail"))
+    parser.add_argument("--trail-bucket", default=os.environ.get('TRAIL_BUCKET', ""))
 
-    parser.add_argument("--event-topic-name", default="asset-audit-events")
-    parser.add_argument("--rule-name", default="ec2-ebs-ami-audit")
-    parser.add_argument("--enricher-function-name", default="ec2-ebs-ami-audit-enricher")
-    parser.add_argument("--enricher-role-name", default="EC2EBSAMIAuditEnricherRole")
-    parser.add_argument("--enricher-source-path", default="ec2_audit_enricher_lambda.py")
-    parser.add_argument("--enricher-thread-table-name", default="ec2-ebs-ami-audit-thread-state")
+    parser.add_argument("--event-topic-name", default=os.environ.get('EVENT_TOPIC_NAME', "asset-audit-events"))
+    parser.add_argument("--rule-name", default=os.environ.get('RULE_NAME', "ec2-ebs-ami-audit"))
+    parser.add_argument("--enricher-function-name", default=os.environ.get('ENRICHER_FUNCTION_NAME', "ec2-ebs-ami-audit-enricher"))
+    parser.add_argument("--enricher-role-name", default=os.environ.get('ENRICHER_ROLE_NAME', "EC2EBSAMIAuditEnricherRole"))
+    parser.add_argument("--enricher-source-path", default=os.environ.get('ENRICHER_SOURCE_PATH', str(Path(__file__).with_name("ec2_audit_enricher_lambda.py"))))
+    parser.add_argument("--enricher-thread-table-name", default=os.environ.get('ENRICHER_THREAD_TABLE_NAME', "ec2-ebs-ami-audit-thread-state"))
 
-    parser.add_argument("--config-bucket", default="")
-    parser.add_argument("--config-role-name", default="AWSConfigRecorderRole")
-    parser.add_argument("--config-recorder-name", default="default")
-    parser.add_argument("--config-delivery-channel-name", default="default")
+    parser.add_argument("--config-bucket", default=os.environ.get('CONFIG_BUCKET', ""))
+    parser.add_argument("--config-role-name", default=os.environ.get('CONFIG_ROLE_NAME', "AWSConfigRecorderRole"))
+    parser.add_argument("--config-recorder-name", default=os.environ.get('CONFIG_RECORDER_NAME', "default"))
+    parser.add_argument("--config-delivery-channel-name", default=os.environ.get('CONFIG_DELIVERY_CHANNEL_NAME', "default"))
 
-    parser.add_argument("--chatbot-region", default="")
-    parser.add_argument("--slack-channel-configuration-name", default="test-configuration")
-    parser.add_argument("--slack-team-id", default="")
-    parser.add_argument("--slack-channel-id", default="")
-    parser.add_argument("--slack-channel-name", default="")
-    parser.add_argument("--chatbot-role-name", default="ChatbotSlackRole")
-    parser.add_argument("--chatbot-role-arn", default="")
+    parser.add_argument("--chatbot-region", default=os.environ.get('CHATBOT_REGION', ""))
+    parser.add_argument("--slack-channel-configuration-name", default=os.environ.get('SLACK_CHANNEL_CONFIGURATION_NAME', "test-configuration"))
+    parser.add_argument("--slack-team-id", default=os.environ.get('SLACK_TEAM_ID', ""))
+    parser.add_argument("--slack-channel-id", default=os.environ.get('SLACK_CHANNEL_ID', ""))
+    parser.add_argument("--slack-channel-name", default=os.environ.get('SLACK_CHANNEL_NAME', ""))
+    parser.add_argument("--chatbot-role-name", default=os.environ.get('CHATBOT_ROLE_NAME', "ChatbotSlackRole"))
+    parser.add_argument("--chatbot-role-arn", default=os.environ.get('CHATBOT_ROLE_ARN', ""))
     parser.add_argument(
         "--chatbot-role-policy-arn",
-        default="arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess",
+        default=os.environ.get('CHATBOT_ROLE_POLICY_ARN', "arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess"),
     )
-    parser.add_argument("--chatbot-logging-level", choices=["ERROR", "INFO", "NONE"], default=None)
-    parser.add_argument("--chatbot-guardrail-policy-arns", default="")
-    parser.add_argument("--chatbot-user-authorization-required", choices=["true", "false"], default=None)
-    parser.add_argument("--sns-topic-arns", default="")
+    parser.add_argument("--chatbot-logging-level", choices=["ERROR", "INFO", "NONE"], default=os.environ.get('CHATBOT_LOGGING_LEVEL', None))
+    parser.add_argument("--chatbot-guardrail-policy-arns", default=os.environ.get('CHATBOT_GUARDRAIL_POLICY_ARNS', ""))
+    parser.add_argument("--chatbot-user-authorization-required", choices=["true", "false"], default=os.environ.get('CHATBOT_USER_AUTHORIZATION_REQUIRED', None))
+    parser.add_argument("--sns-topic-arns", default=os.environ.get('SNS_TOPIC_ARNS', ""))
 
     return parser.parse_args()
 
 
 def validate_args(args: argparse.Namespace) -> None:
     """Validate argument combinations before running setup."""
+    # Argparse validates explicit choices, but not environment-supplied defaults.
+    for name, choices in {
+        "alert_destination": ("email", "slack"),
+        "chatbot_logging_level": (None, "", "ERROR", "INFO", "NONE"),
+        "chatbot_user_authorization_required": (None, "", "true", "false"),
+    }.items():
+        if getattr(args, name) not in choices:
+            raise SystemExit(f"Invalid {name}; choose from {choices}.")
     if args.command in ["all", "events"] and args.alert_destination == "email" and not args.email_endpoint:
         raise SystemExit("--email-endpoint is required for email destination when running all/events.")
     if args.command in ["all", "slack"] and args.alert_destination == "slack":

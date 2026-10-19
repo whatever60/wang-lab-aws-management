@@ -20,7 +20,7 @@ def sync(function_name: str = FUNCTION_NAME) -> dict:
         Payload=json.dumps({"source": "wanglab.member-access", "action": "reconcile"}).encode())
     result = json.loads(response["Payload"].read())
     if response.get("FunctionError"):
-        raise RuntimeError("Member lifecycle synchronization failed; inspect its CloudWatch error and failure queue")
+        raise RuntimeError("Member lifecycle synchronization failed; inspect its CloudWatch log and error alarm")
     return result
 
 

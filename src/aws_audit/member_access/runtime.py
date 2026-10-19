@@ -1,6 +1,6 @@
 """Live, event-driven member access reconciliation and offline deployment helpers.
 
-SSM contains approved infrastructure, never a membership registry. Every pass
+The function environment contains approved infrastructure, never a membership registry. Every pass
 derives members and home ownership from IAM and S3 metadata. No access keys,
 object contents, event bodies, or full reconciliation plans are logged here.
 """
@@ -17,7 +17,7 @@ from ..ec2_access.launch import build_launch_request
 from ..ec2_access.policy import config_from_mapping as ec2_config_from_mapping
 
 
-CONFIG_PARAMETER_ENV = "WANGLAB_MEMBER_ACCESS_CONFIG"
+CONFIG_ENV = "WANGLAB_MEMBER_ACCESS_CONFIG"
 CONTROL_REGION = "us-east-1"
 HANDLER = "aws_audit.member_access.runtime.lambda_handler"
 IAM_EVENTS = ("AddUserToGroup", "RemoveUserFromGroup", "TagUser", "UntagUser", "DeleteUser")
@@ -70,14 +70,6 @@ def _account(value: Any) -> str:
     return value
 
 
-def _parameter(value: Any) -> str:
-    if not isinstance(value, str) or not re.fullmatch(r"/wanglab/member-access/[A-Za-z0-9_.\-/]+", value):
-        raise RuntimeValidationError("configuration must use the managed SSM parameter path")
-    if "//" in value or any(part in (".", "..") for part in value.split("/")):
-        raise RuntimeValidationError("invalid SSM parameter name")
-    return value
-
-
 def validate_runtime_config(value: Any, *, account_id: str, region: str) -> Dict[str, Any]:
     """Validate infrastructure-only configuration, rejecting stale user manifests."""
     _account(account_id)
@@ -122,14 +114,10 @@ def validate_runtime_config(value: Any, *, account_id: str, region: str) -> Dict
             "permissions_boundary_arn": boundary}
 
 
-def load_runtime_config(ssm: Any, parameter_name: str, *, account_id: str, region: str) -> Dict[str, Any]:
-    """Read only the administrator-selected, nonsecret SSM String parameter."""
-    parameter_name = _parameter(parameter_name)
-    response = ssm.get_parameter(Name=parameter_name, WithDecryption=False)["Parameter"]
-    if response.get("Type") != "String" or response.get("Name") != parameter_name:
-        raise RuntimeValidationError("expected the exact nonsecret SSM String parameter")
+def load_runtime_config(*, account_id: str, region: str) -> Dict[str, Any]:
+    """Validate the nonsecret configuration deployed with the function."""
     try:
-        value = json.loads(response["Value"])
+        value = json.loads(os.environ[CONFIG_ENV])
     except (KeyError, TypeError, ValueError):
         raise RuntimeValidationError("configuration is not JSON") from None
     return validate_runtime_config(value, account_id=account_id, region=region)
@@ -357,11 +345,10 @@ def lambda_handler(event: Any, context: Any) -> dict:
     trigger = _trigger(event, account_id)
     if trigger == "ignored":
         return {"status": "ignored"}
-    parameter_name = _parameter(os.environ.get(CONFIG_PARAMETER_ENV))
     import boto3
     try:
         session = boto3.Session(region_name=region)
-        config = load_runtime_config(session.client("ssm"), parameter_name, account_id=account_id, region=region)
+        config = load_runtime_config(account_id=account_id, region=region)
         result = run_reconciliation(session.client("iam"), session.client("s3"),
                                     {r: session.client("ec2", region_name=r) for r in config["ec2_config"]["regions"]},
                                     config, account_id=account_id, region=region)
@@ -398,45 +385,3 @@ def build_runtime_package(source_root: Path) -> bytes:
             info.compress_type = zipfile.ZIP_DEFLATED
             archive.writestr(info, path.read_bytes())
     return data.getvalue()
-
-
-def deployment_plan(*, account_id: str, region: str, function_name: str,
-                    execution_role_arn: str, config_parameter: str) -> dict:
-    """Return reviewable deployment inputs; this function never calls AWS."""
-    _account(account_id)
-    if region != CONTROL_REGION or not re.fullmatch(r"[A-Za-z0-9_\-]{1,48}", function_name):
-        raise RuntimeValidationError("invalid control-plane deployment target")
-    if not re.fullmatch(r"arn:aws:iam::" + account_id + r":role/[A-Za-z0-9_+=,.@/\-]+", execution_role_arn):
-        raise RuntimeValidationError("execution role must belong to the deployment account")
-    config_parameter = _parameter(config_parameter)
-    function_arn = "arn:aws:lambda:%s:%s:function:%s" % (region, account_id, function_name)
-    rules = [
-        {"Name": function_name + "-iam", "EventPattern": {"source": ["aws.iam"],
-         "detail-type": ["AWS API Call via CloudTrail"], "account": [account_id],
-         "detail": {"eventSource": ["iam.amazonaws.com"], "eventName": list(IAM_EVENTS)}}},
-        {"Name": function_name + "-periodic", "ScheduleExpression": "rate(5 minutes)"},
-    ]
-    for rule in rules:
-        rule["State"] = "ENABLED"
-        rule["Targets"] = [{"Id": "member-access", "Arn": function_arn,
-                            "RetryPolicy": {"MaximumRetryAttempts": 2, "MaximumEventAgeInSeconds": 3600}}]
-    return {"function": {"FunctionName": function_name, "Runtime": "python3.12", "Handler": HANDLER,
-                         "Role": execution_role_arn, "Timeout": 300, "MemorySize": 256,
-                         "ReservedConcurrentExecutions": 1,
-                         "Environment": {"Variables": {CONFIG_PARAMETER_ENV: config_parameter}}},
-            "rules": rules,
-            "invoke_permissions": [{"StatementId": rule["Name"], "Action": "lambda:InvokeFunction",
-                                    "Principal": "events.amazonaws.com", "FunctionName": function_name,
-                                    "SourceAccount": account_id,
-                                    "SourceArn": "arn:aws:events:%s:%s:rule/%s" % (region, account_id, rule["Name"])}
-                                   for rule in rules],
-            "config_parameter_arn": "arn:aws:ssm:%s:%s:parameter%s" % (region, account_id, config_parameter),
-            "ssm_read": {"Action": ["ssm:GetParameter"],
-                         "Resource": "arn:aws:ssm:%s:%s:parameter%s" % (region, account_id, config_parameter)},
-            "package_files": list(PACKAGE_FILES),
-            "prerequisites": ["Enabled CloudTrail trail with global IAM write-management events",
-                              "Complete managed-resource reconciliation IAM policy on the execution role",
-                              "Source ZIP uploaded separately; no credentials or live membership in configuration",
-                              "Member principals cannot invoke this function or modify its SSM configuration"],
-            "delivery": {"membership_source": "live IAM group and metadata", "schedule_minutes": 5,
-                         "event_delivery": "best-effort; periodic reconciliation repairs missed events"}}

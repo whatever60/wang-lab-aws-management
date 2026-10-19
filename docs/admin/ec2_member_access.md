@@ -129,8 +129,12 @@ survives expiry. Unresolved resources remain administrator-controlled.
 
 ```bash
 umask 077
-PYTHONPATH=src python -m aws_audit.ec2_access /private/reviewed-member-ec2.json > /private/member-ec2-policies.json
+PYTHONPATH=src python -m aws_audit.ec2_access config/member_access.local.json > /private/member-ec2-policies.json
 ```
+
+The controller and policy builder share `config/member_access.local.json`;
+the builder uses its `ec2_config` section. A standalone reviewed EC2 config is
+also accepted for offline use; no second live EC2 configuration file is needed.
 
 Output maps managed-policy names to complete documents, deterministically split
 below IAM's 6144-character limit. Attach the **complete bundle together**; the

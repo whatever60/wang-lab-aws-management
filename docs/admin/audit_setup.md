@@ -62,6 +62,15 @@ Do not commit account-specific values. Keep these in a local shell profile,
 
 The command intentionally fails early when Slack setup is requested without Slack IDs.
 
+The old `setup_ec2_ebs_ami_audit.sh` entry point forwards to this same Python
+command. Its flags and environment defaults (for example `BASE_REGION`,
+`ALERT_DESTINATION`, `SLACK_TEAM_ID` and `SLACK_CHANNEL_ID`) remain supported;
+explicit flags override environment values. There is one deployment implementation.
+The wrapper uses `python3` directly, or `AWS_AUDIT_PYTHON` if set, and works from
+another directory without requiring a separate package installation.
+The default enricher ZIP is built from the packaged Python source, independent
+of the working directory.
+
 ## Validation
 
 After setup, validate with AWS CLI read-only calls:

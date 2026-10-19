@@ -1,3 +1,5 @@
+import copy
+import json
 import unittest
 
 from aws_audit.member_access.deployment import cloudformation_template, data_boundary, runtime_permissions
@@ -47,15 +49,26 @@ class DeploymentTest(unittest.TestCase):
         self.assertEqual(own["Resource"], "arn:aws:s3:::${aws:PrincipalTag/HomeBucket}/*")
         self.assertEqual(own["Condition"]["StringEquals"]["s3:ResourceAccount"], "111122223333")
 
-    def test_stack_serializes_execution_and_has_retry_failure_paths(self):
+    def test_stack_uses_one_rule_for_events_and_periodic_repair(self):
         stack = cloudformation_template(approved(), artifact_bucket="example-artifacts", artifact_key="member-access/releases/reviewed.zip")
         resources = stack["Resources"]
         self.assertEqual(resources["Function"]["Properties"]["ReservedConcurrentExecutions"], 1)
-        self.assertEqual(resources["Periodic"]["Properties"]["ScheduleExpression"], "rate(5 minutes)")
+        self.assertEqual(resources["IdentityChanges"]["Properties"]["ScheduleExpression"], "rate(5 minutes)")
         self.assertIn("RemoveUserFromGroup", resources["IdentityChanges"]["Properties"]["EventPattern"]["detail"]["eventName"])
-        self.assertEqual(resources["Config"]["Properties"]["Type"], "String")
-        self.assertIn("DeadLetterConfig", resources["Function"]["Properties"])
+        env = resources["Function"]["Properties"]["Environment"]["Variables"]
+        self.assertEqual(json.loads(env["WANGLAB_MEMBER_ACCESS_CONFIG"]), approved())
+        self.assertEqual(len(resources), 7)
+        self.assertFalse(any(r["Type"] in ("AWS::SSM::Parameter", "AWS::SQS::Queue", "AWS::Lambda::EventInvokeConfig")
+                             for r in resources.values()))
+        self.assertNotIn("DeadLetterConfig", resources["Function"]["Properties"])
+        self.assertIn("Errors", resources)
         self.assertEqual(resources["Boundary"]["DeletionPolicy"], "Retain")
+
+    def test_oversized_configuration_is_rejected_before_deployment(self):
+        config = copy.deepcopy(approved())
+        config["ec2_config"]["instance_types"] += ["t3.type" + str(n) for n in range(500)]
+        with self.assertRaisesRegex(ValueError, "4 KB"):
+            cloudformation_template(config, artifact_bucket="example-artifacts", artifact_key="member-access/releases/reviewed.zip")
 
     def test_deployment_rejects_unmanaged_artifacts_or_foreign_boundary(self):
         with self.assertRaises(ValueError):

@@ -40,7 +40,6 @@ nav:
   - Developer Notes:
       - Architecture: developer/architecture.md
       - HPC Implementation: developer/hpc_implementation.md
-      - Refactor TODO: developer/refactor_modular_docs_todo.md
   - Reference And Archive:
       - AWS HPC Workflow Proposal: reference/aws_hpc_workflow_proposal.md
       - AWS PCS + EFS Archive: reference/aws_pcs_efs_workflow.md

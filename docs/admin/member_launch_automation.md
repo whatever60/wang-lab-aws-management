@@ -92,8 +92,12 @@ processes with metadata access share the role's S3 authority.
 
 The controller runs in the account's **`us-east-1`** region. EventBridge invokes
 `wanglab-member-access-sync` for CloudTrail IAM events `AddUserToGroup`,
-`RemoveUserFromGroup`, `TagUser`, `UntagUser`, and `DeleteUser`. A five-minute
-scheduled rule repairs missed events, key changes, and bucket-tag changes.
+`RemoveUserFromGroup`, `TagUser`, `UntagUser`, and `DeleteUser`. The same rule
+also runs every five minutes to repair missed events, key
+changes, and bucket-tag changes. EventBridge supports an event pattern and a
+schedule on one rule.
+[AWS rule behavior](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-events-rule.html)
+
 CloudTrail management-event delivery must include the relevant IAM events in
 this region. The deployed function has reserved concurrency one; manual sync
 uses the same function so ordinary event/manual runs are serialized.
@@ -103,7 +107,9 @@ captures managed-resource metadata, and builds a deterministic plan. Apply
 rechecks that the preview is unchanged. All known revocations are attempted
 before any provisioning or activation. Grant checks repeat before and after
 publishing access; membership churn causes retry or a grant-free pass.
-Unchanged policies, templates, and user pointers produce no repeat writes.
+Unchanged policies, templates, and user pointers produce no repeat writes. An
+unchanged pass skips the second resource scan because it has no mutations to
+authorize; the runtime still rechecks membership and home ownership.
 
 For a removed/deleted member, invalid ownership, or unreadable per-member
 identity metadata, the controller removes the four user pointers where the
@@ -126,17 +132,19 @@ offboarding target.
 
 Event delivery is best effort. The five-minute schedule is a repair interval,
 not a hard revocation deadline. Lambda retries, failures, and IAM propagation
-can extend the interval. Check the function's error alarm, CloudWatch logs, and
-failure queue; SDK diagnostics contain only sanitized operation/error codes,
+can extend the interval. Check the function's error alarm and CloudWatch logs;
+SDK diagnostics contain only sanitized operation/error codes,
 not full event bodies, credentials, or plans.
 [AWS IAM propagation behavior](https://docs.aws.amazon.com/IAM/latest/UserGuide/troubleshoot.html#troubleshoot_general_eventual-consistency)
 
 ## Configuration and Administrative Commands
 
 Keep live inventory in ignored, private configuration such as
-`config/member_access.local.json`. The deployed SSM String parameter
-`/wanglab/member-access/config` contains approved infrastructure, not a static
-member roster or credentials:
+`config/member_access.local.json`. CloudFormation deploys its compact nonsecret
+JSON directly in the Lambda environment variable `WANGLAB_MEMBER_ACCESS_CONFIG`.
+There is no separate SSM configuration resource or lookup. Deployment rejects
+configuration exceeding the 4 KB aggregate environment limit. The configuration
+contains approved infrastructure, not a static member roster or credentials:
 
 - `ec2_config`: the reviewed member EC2 policy configuration, including
   `member_launch` with the protected paths/four tag keys and
@@ -199,9 +207,15 @@ aws-audit member-access render-stack --config config/member_access.local.json \
 
 Rendering and packaging do not upload or deploy anything. Artifact upload,
 CloudFormation deployment with named-IAM capability, and code/config changes
-are separate administrator operations. The stack defines the data boundary,
-SSM parameter, serialized Lambda/controller role, IAM-event and periodic rules,
-error alarm, and encrypted failure queue. Keep the artifact private and tie
+are separate administrator operations. The seven-resource stack defines the
+data boundary,
+serialized Lambda/controller role, one combined IAM-event/periodic rule and its
+invoke permission, log group and error alarm. Native Lambda asynchronous retries
+and the periodic fresh-state pass handle recovery; no event replay queue or
+custom retry resource is needed. Logs retain the failure diagnostics.
+[AWS default retries](https://docs.aws.amazon.com/lambda/latest/dg/invocation-async-error-handling.html)
+
+Keep the artifact private and tie
 releases to reviewed source and package checksums.
 
 ## Trust and Acceptance Boundaries
@@ -210,7 +224,7 @@ The controller is a privileged **IAM provisioner**. It has no direct S3 object
 read/write or EC2 start permission, but it can delegate bounded S3 authority by
 changing personal roles and templates. That is indirect data authority; do
 not treat the controller as an untrusted metadata-only component. Code updates,
-SSM configuration, artifact replacement, boundary edits, and Lambda/IAM
+function configuration, artifact replacement, boundary edits, and Lambda/IAM
 administration must remain administrator-only. The boundary reduces the
 delegation ceiling; it does not make arbitrary controller code safe.
 

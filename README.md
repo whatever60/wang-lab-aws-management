@@ -1,7 +1,7 @@
 # AWS Audit
 
-Utilities for AWS inventory reporting, cost allocation, S3 access reconciliation,
-audit alert setup, and AWS ParallelCluster/Slurm workflow management.
+Lab AWS access, personal EC2 launches, inventory and cost reports, audit alerts,
+and optional ParallelCluster/Slurm test tooling.
 
 The repo now exposes one command:
 
@@ -15,6 +15,7 @@ Common entry points:
 uv run aws-audit inventory --help
 uv run aws-audit monthly-costs --help
 uv run aws-audit s3-access --help
+uv run aws-audit member-access --help
 uv run aws-audit audit-setup --help
 uv run aws-audit hpc --help
 ```
@@ -46,6 +47,9 @@ Examples:
   ParallelCluster values.
 - `config/s3_access_manifest.example.json` is a safe example. Copy it to ignored
   `config/s3_access_manifest.local.json` before running S3 reconciliation.
+- `config/member_access.local.json` holds approved launch infrastructure. The
+  deployed function receives this nonsecret JSON directly; live IAM membership
+  and bucket ownership tags remain authoritative.
 - Generated operational files such as `config/parallelcluster_lab.yaml`,
   `config/parallelcluster_active_instance_types.txt`, catalog snapshots, outputs,
   and `site/` are ignored.

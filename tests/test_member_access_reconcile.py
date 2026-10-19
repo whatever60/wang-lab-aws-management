@@ -3,6 +3,7 @@
 import copy
 import json
 import re
+import sys
 import unittest
 from dataclasses import asdict, replace
 from unittest.mock import patch
@@ -272,7 +273,9 @@ class MemberAccessReconcileTest(unittest.TestCase):
             self.assertEqual(json.loads(initial[2]["AssumeRolePolicyDocument"]), trust_policy(False))
             self.assertEqual(initial[2]["PermissionsBoundary"], BOUNDARY)
         self.timeline.clear()
-        self.assertEqual(self.reconcile()["applied"], [])
+        with patch.object(sys.modules[snapshot.__module__], "snapshot", wraps=snapshot) as capture:
+            self.assertEqual(self.reconcile()["applied"], [])
+            self.assertEqual(capture.call_count, 1)
         self.assertEqual(self.timeline, [])
 
     def test_missing_owned_key_stays_inactive_without_guessing_name(self):

@@ -3,6 +3,7 @@
 import copy
 import io
 import json
+import os
 import sys
 import tempfile
 import types
@@ -16,7 +17,6 @@ from aws_audit.member_access import runtime
 
 ACCOUNT = "123456789012"
 REGION = "us-east-1"
-PARAMETER = "/wanglab/member-access/config"
 PREFIX = "arn:aws:ec2:" + REGION + ":" + ACCOUNT + ":"
 
 
@@ -83,16 +83,6 @@ class S3:
         return {"TagSet": tags(value)}
 
 
-class Ssm:
-    def __init__(self):
-        self.parameter = {"Name": PARAMETER, "Type": "String", "Value": json.dumps(configuration())}
-        self.reads = []
-
-    def get_parameter(self, **kwargs):
-        self.reads.append(kwargs)
-        return {"Parameter": self.parameter}
-
-
 class MemberAccessRuntimeTest(unittest.TestCase):
     def capture(self, iam, s3):
         return runtime.live_member_manifest(iam, s3, account_id=ACCOUNT)
@@ -102,7 +92,7 @@ class MemberAccessRuntimeTest(unittest.TestCase):
                                           account_id=ACCOUNT, region=REGION,
                                           reconcile_call=backend, **kwargs)
 
-    def test_ssm_configuration_is_infrastructure_only_and_account_bound(self):
+    def test_configuration_is_infrastructure_only_and_account_bound(self):
         good = configuration()
         self.assertEqual(runtime.validate_runtime_config(good, account_id=ACCOUNT, region=REGION), good)
         for change in ({"s3_manifest": {"users": []}}, {"users": ["Alice"]},
@@ -120,18 +110,15 @@ class MemberAccessRuntimeTest(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(runtime.RuntimeValidationError):
                 runtime.validate_runtime_config(value, account_id=ACCOUNT, region=REGION)
 
-    def test_only_exact_nonsecret_parameter_is_loaded_without_decryption(self):
-        ssm = Ssm()
-        self.assertEqual(runtime.load_runtime_config(ssm, PARAMETER, account_id=ACCOUNT, region=REGION), configuration())
-        self.assertEqual(ssm.reads, [{"Name": PARAMETER, "WithDecryption": False}])
-        for field, value in (("Name", "/other/config"), ("Type", "SecureString"), ("Value", "not-json")):
-            ssm = Ssm()
-            ssm.parameter[field] = value
-            with self.subTest(field=field), self.assertRaises(runtime.RuntimeValidationError):
-                runtime.load_runtime_config(ssm, PARAMETER, account_id=ACCOUNT, region=REGION)
-        for name in ("/other/config", "/wanglab/member-access/../config", "/wanglab/member-access//config"):
-            with self.assertRaises(runtime.RuntimeValidationError):
-                runtime.load_runtime_config(Ssm(), name, account_id=ACCOUNT, region=REGION)
+    def test_environment_config_is_json_and_missing_invalid_values_fail_closed(self):
+        with mock.patch.dict("os.environ", {runtime.CONFIG_ENV: json.dumps(configuration())}):
+            self.assertEqual(runtime.load_runtime_config(account_id=ACCOUNT, region=REGION), configuration())
+        for value in (None, "not-json", "null", "{}", "/old/parameter/path"):
+            with self.subTest(value=value), mock.patch.dict("os.environ", {}, clear=True):
+                if value is not None:
+                    os.environ[runtime.CONFIG_ENV] = value
+                with self.assertRaises(runtime.RuntimeValidationError):
+                    runtime.load_runtime_config(account_id=ACCOUNT, region=REGION)
 
     def test_live_membership_and_three_bucket_tags_are_authoritative(self):
         iam = Iam(("Alice", "Bob"), page_size=1)
@@ -267,8 +254,8 @@ class MemberAccessRuntimeTest(unittest.TestCase):
         self.assertEqual(result["pending_key"], 1)
 
     def test_lambda_envelope_does_not_supply_membership_or_log_its_contents(self):
-        iam, s3, ssm = Iam(), S3(), Ssm()
-        clients = {"iam": iam, "s3": s3, "ssm": ssm, "ec2": object()}
+        iam, s3 = Iam(), S3()
+        clients = {"iam": iam, "s3": s3, "ec2": object()}
         session = types.SimpleNamespace(client=lambda service, **kwargs: clients[service])
         sdk = types.SimpleNamespace(Session=lambda **kwargs: session)
         context = types.SimpleNamespace(invoked_function_arn="arn:aws:lambda:" + REGION + ":" + ACCOUNT + ":function:MemberSync")
@@ -278,7 +265,7 @@ class MemberAccessRuntimeTest(unittest.TestCase):
                             "unrelated": "do not log this event payload"}}
         seen = []
         with mock.patch.dict(sys.modules, {"boto3": sdk}), \
-                mock.patch.dict("os.environ", {runtime.CONFIG_PARAMETER_ENV: PARAMETER}), \
+                mock.patch.dict("os.environ", {runtime.CONFIG_ENV: json.dumps(configuration())}), \
                 mock.patch.object(runtime, "_backend", side_effect=lambda *args: seen.append(args[2])), \
                 mock.patch("builtins.print") as printed:
             result = runtime.lambda_handler(event, context)
@@ -338,18 +325,6 @@ class MemberAccessRuntimeTest(unittest.TestCase):
             with self.assertRaises(runtime.RuntimeValidationError):
                 runtime.build_runtime_package(root)
 
-    def test_deployment_plan_has_serial_execution_least_invoke_scope_and_periodic_repair(self):
-        plan = runtime.deployment_plan(account_id=ACCOUNT, region=REGION, function_name="MemberSync",
-                                       execution_role_arn="arn:aws:iam::" + ACCOUNT + ":role/MemberSyncExecution",
-                                       config_parameter=PARAMETER)
-        self.assertEqual(plan["function"]["ReservedConcurrentExecutions"], 1)
-        self.assertEqual(plan["function"]["Handler"], runtime.HANDLER)
-        self.assertEqual(plan["rules"][1]["ScheduleExpression"], "rate(5 minutes)")
-        self.assertEqual(set(plan["rules"][0]["EventPattern"]["detail"]["eventName"]), set(runtime.IAM_EVENTS))
-        self.assertTrue(all(p["SourceAccount"] == ACCOUNT and ":rule/MemberSync-" in p["SourceArn"]
-                            for p in plan["invoke_permissions"]))
-        self.assertEqual(plan["ssm_read"]["Resource"], plan["config_parameter_arn"])
-        self.assertEqual(plan["ssm_read"]["Action"], ["ssm:GetParameter"])
 
 
 if __name__ == "__main__":
