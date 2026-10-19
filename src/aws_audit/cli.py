@@ -11,6 +11,7 @@ COMMAND_MODULES = {
     "hpc": "aws_audit.hpc.workflow",
     "inventory": "aws_audit.inventory.tables",
     "monthly-costs": "aws_audit.cost.monthly_compute",
+    "member-access": "aws_audit.member_access.cli",
     "s3-access": "aws_audit.s3_access.reconcile",
     "visual-check": "aws_audit.tools.check_visual_layout",
 }

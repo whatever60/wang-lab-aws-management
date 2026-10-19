@@ -9,7 +9,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Mapping, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 
 SELF = "${aws:username}"
@@ -41,6 +41,16 @@ class SharedGrant:
 
 
 @dataclass(frozen=True)
+class MemberLaunchConfig:
+    """Admin-controlled principal tags select templates without policy rewrites."""
+
+    role_path: str
+    instance_profile_path: str
+    template_tag_keys: Tuple[str, ...]
+    require_template: bool = True
+
+
+@dataclass(frozen=True)
 class MemberEc2Config:
     account_id: str
     regions: Tuple[str, ...]
@@ -50,6 +60,7 @@ class MemberEc2Config:
     approved_subnet_arns: Tuple[str, ...]
     approved_security_group_arns: Tuple[str, ...]
     shared_grants: Tuple[SharedGrant, ...] = field(default_factory=tuple)
+    member_launch: Optional[MemberLaunchConfig] = None
 
 
 def policy_size(document: Mapping[str, Any]) -> int:
@@ -59,12 +70,13 @@ def policy_size(document: Mapping[str, Any]) -> int:
 
 def config_from_mapping(value: Mapping[str, Any]) -> MemberEc2Config:
     """Read an explicit JSON configuration; reject omissions and unknown fields."""
+    optional = {"shared_grants", "member_launch"}
     fields = {"account_id", "regions", "instance_types", "approved_image_arns", "approved_snapshot_arns",
-              "approved_subnet_arns", "approved_security_group_arns", "shared_grants"}
-    if not isinstance(value, dict) or set(value) - fields or fields - {"shared_grants"} - set(value):
+              "approved_subnet_arns", "approved_security_group_arns"} | optional
+    if not isinstance(value, dict) or set(value) - fields or fields - optional - set(value):
         raise ValueError("configuration contains unknown fields or missing required fields")
     kwargs = {"account_id": value["account_id"]}
-    for key in fields - {"account_id", "shared_grants"}:
+    for key in fields - optional - {"account_id"}:
         items = value[key]
         if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
             raise ValueError(key + " must be an array of strings")
@@ -85,6 +97,16 @@ def config_from_mapping(value: Mapping[str, Any]) -> MemberEc2Config:
         normalized.append(SharedGrant(grant["resource_arn"], tuple(grant["principal_arns"]),
                                       tuple(grant["actions"]), grant["expires_at"], grant["reason"]))
     kwargs["shared_grants"] = tuple(normalized)
+    member_launch = value.get("member_launch")
+    if member_launch is not None:
+        expected = {"role_path", "instance_profile_path", "template_tag_keys", "require_template"}
+        if not isinstance(member_launch, dict) or set(member_launch) != expected:
+            raise ValueError("member_launch requires exact explicit role/profile paths, template_tag_keys, and require_template")
+        keys = member_launch["template_tag_keys"]
+        if not isinstance(keys, list) or any(not isinstance(item, str) for item in keys):
+            raise ValueError("template_tag_keys must be an array of strings")
+        kwargs["member_launch"] = MemberLaunchConfig(member_launch["role_path"], member_launch["instance_profile_path"],
+                                                    tuple(keys), member_launch["require_template"])
     result = MemberEc2Config(**kwargs)
     _validate(result)
     return result
@@ -131,12 +153,23 @@ def _validate(config: MemberEc2Config) -> None:
         # the explicit expiration Deny. IAM evaluates expiry at request time.
         if expiry.year < 2020:
             raise ValueError("shared expiry is outside the supported range")
+    if config.member_launch is not None:
+        launch = config.member_launch
+        if not isinstance(launch, MemberLaunchConfig) or not isinstance(launch.require_template, bool):
+            raise ValueError("member_launch must be a MemberLaunchConfig with boolean require_template")
+        for path in (launch.role_path, launch.instance_profile_path):
+            if not isinstance(path, str) or not re.fullmatch(r"/(?:[A-Za-z0-9_+=,.@-]+/)+", path):
+                raise ValueError("member launch IAM paths must be exact non-root paths ending in slash")
+        if not 1 <= len(launch.template_tag_keys) <= 4 or len(set(launch.template_tag_keys)) != len(launch.template_tag_keys):
+            raise ValueError("member launch requires one to four unique template tag keys")
+        if any(not isinstance(key, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,63}", key) for key in launch.template_tag_keys):
+            raise ValueError("member template tag keys must be exact alphanumeric IAM tag names")
 
 
 def _validate_arn(config: MemberEc2Config, arn: str, kind: str) -> None:
     account = "" if kind in ("image", "snapshot") else config.account_id
     prefix = {"image": "ami", "snapshot": "snap", "subnet": "subnet",
-              "security-group": "sg", "instance": "i"}[kind]
+              "security-group": "sg", "instance": "i", "launch-template": "lt"}[kind]
     pattern = r"arn:aws:ec2:([^:]+):" + account + ":" + kind + "/" + prefix + r"-[a-f0-9]+"
     match = re.fullmatch(pattern, arn) if isinstance(arn, str) else None
     if not match or match.group(1) not in config.regions:
@@ -173,21 +206,66 @@ def build_policy_bundle(config: MemberEc2Config, *, max_policy_size: int = 6144)
     foreign = {"StringNotEquals": {"ec2:ResourceTag/Owner": SELF}}
     new_tags = {"StringEquals": {"aws:RequestTag/Owner": SELF, "aws:RequestTag/Project": "personal"},
                 "ForAllValues:StringEquals": {"aws:TagKeys": ["Owner", "Project", "Name"]}}
+    launch = config.member_launch
+    template_arns = ["${aws:PrincipalTag/" + key + "}" for key in launch.template_tag_keys] if launch else []
+    template_resources = arns("launch-template") if launch else []
 
     add("Inventory", "Allow", ["ec2:Describe*"])
     # ec2:Region is EC2-only. The Null test prevents NotAction from denying
     # unrelated services, e.g. the member's existing S3 and password permissions.
-    add("DenyOtherEc2Actions", "Deny", ALLOWED_ACTIONS,
+    # PassRole is an explicitly guarded EC2 dependency in managed-launch mode;
+    # exclude it even if the EC2 authorization context carries ec2:Region into
+    # its dependent authorization. No other new mutation leaves the EC2 gate.
+    gated_actions = ALLOWED_ACTIONS + (("iam:PassRole",) if launch else ())
+    add("DenyOtherEc2Actions", "Deny", gated_actions,
         condition={"Null": {"ec2:Region": "false"}}, not_action=True)
     add("DenyMutationOutsideApprovedRegions", "Deny", MUTATIONS,
         condition={"StringNotEquals": {"ec2:Region": sorted(config.regions)}})
-    add("DenyAlternateInfrastructureAndAccessPaths", "Deny", [
-        "elasticloadbalancing:*", "autoscaling:*", "ebs:*", "iam:PassRole", "iam:CreateServiceLinkedRole",
+    alternate_paths = [
+        "elasticloadbalancing:*", "autoscaling:*", "ebs:*", "iam:CreateServiceLinkedRole",
         "iam:TagUser", "iam:UntagUser", "sts:AssumeRole", "sts:TagSession",
         "ssm:*", "ec2-instance-connect:*",
         "cloudwatch:PutMetricAlarm", "cloudwatch:PutCompositeAlarm", "cloudwatch:EnableAlarmActions",
         "cloudwatch:SetAlarmState", "cloudwatch:PutMetricData",
-    ])
+    ]
+    if launch is None:
+        alternate_paths.append("iam:PassRole")
+    add("DenyAlternateInfrastructureAndAccessPaths", "Deny", alternate_paths)
+    if launch is not None:
+        role_arn = "arn:aws:iam::" + config.account_id + ":role" + launch.role_path + SELF
+        profile_arn = "arn:aws:iam::" + config.account_id + ":instance-profile" + launch.instance_profile_path + SELF
+        add("PassOwnPersonalS3RoleToEc2", "Allow", ["iam:PassRole"], role_arn,
+            {"StringEquals": {"iam:PassedToService": "ec2.amazonaws.com"}})
+        add("DenyForeignPassRole", "Deny", ["iam:PassRole"], role_arn, not_resource=True)
+        add("DenyPassRoleToOtherServices", "Deny", ["iam:PassRole"],
+            condition={"StringNotEquals": {"iam:PassedToService": "ec2.amazonaws.com"}})
+        add("ListInstanceProfilesForConsole", "Allow", ["iam:ListInstanceProfiles"])
+        add("ReadOwnInstanceProfileForConsole", "Allow", ["iam:GetInstanceProfile"], profile_arn)
+        add("ReadOwnRoleForConsole", "Allow", ["iam:GetRole", "iam:ListInstanceProfilesForRole"], role_arn)
+        add("DenyMemberIdentityAdministration", "Deny", [
+            "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile", "iam:AddRoleToInstanceProfile",
+            "iam:RemoveRoleFromInstanceProfile", "iam:TagInstanceProfile", "iam:UntagInstanceProfile",
+            "iam:CreateRole", "iam:DeleteRole", "iam:UpdateRole", "iam:UpdateRoleDescription",
+            "iam:UpdateAssumeRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy",
+            "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePermissionsBoundary",
+            "iam:DeleteRolePermissionsBoundary", "iam:TagRole", "iam:UntagRole",
+        ])
+        # Denies without policy variables keep unresolved template-tag variables
+        # from invalidating a template string-comparison guard and opening a bypass.
+        # Admin onboarding must finish every configured flavor before enabling
+        # launches; offboarding can revoke launch/PassRole by clearing any tag.
+        member_actions = ["ec2:RunInstances", "iam:PassRole"]
+        add("DenyMemberLaunchWithoutIamUsername", "Deny", member_actions,
+            condition={"StringNotLike": {"aws:username": "?*"}})
+        add("DenyLaunchUnlessCurrentMember", "Deny", member_actions,
+            condition={"StringNotEquals": {"aws:PrincipalTag/AccessRole": "CurrentMember"}})
+        add("DenyLaunchWithoutHomeBucket", "Deny", member_actions,
+            condition={"StringNotLike": {"aws:PrincipalTag/HomeBucket": "?*"}})
+        for index, key in enumerate(launch.template_tag_keys):
+            expected_templates = ["arn:aws:ec2:%s:%s:launch-template/lt-*" % (region, config.account_id)
+                                  for region in sorted(config.regions)]
+            add("DenyInvalidMemberTemplateTag" + str(index + 1), "Deny", member_actions,
+                condition={"StringNotLike": {"aws:PrincipalTag/" + key: expected_templates}})
 
     shared_resources = sorted(grant.resource_arn for grant in config.shared_grants)
     for kind, actions in OWNED_ACTIONS.items():
@@ -222,15 +300,36 @@ def build_policy_bundle(config: MemberEc2Config, *, max_policy_size: int = 6144)
     sources = sorted(config.approved_image_arns + config.approved_snapshot_arns
                      + config.approved_subnet_arns + config.approved_security_group_arns)
     add("ApprovedLaunchSources", "Allow", ["ec2:RunInstances"], sources)
+    if launch is not None:
+        # Whole-ARN variables are valid string-condition values, not Resource
+        # ARNs. Keep fixed account/region resource ARNs and bind the actual
+        # template through EC2's trusted LaunchTemplate context. Template Owner
+        # is also admin-controlled: members cannot tag or modify templates.
+        add("UseOwnMemberLaunchTemplates", "Allow", ["ec2:RunInstances"], template_resources,
+            {"StringEquals": {"ec2:LaunchTemplate": template_arns, "ec2:ResourceTag/Owner": SELF}})
+        add("DenyForeignMemberTemplateResource", "Deny", ["ec2:RunInstances"], template_resources, foreign)
     add("TaggedLaunchDestinations", "Allow", ["ec2:RunInstances"], destinations, new_tags)
     add("DenyUnapprovedLaunchResource", "Deny", ["ec2:RunInstances"],
-        sources + destinations + arns("key-pair"), not_resource=True)
+        sources + destinations + arns("key-pair") + template_resources, not_resource=True)
     add("DenyUnapprovedInstanceType", "Deny", ["ec2:RunInstances", "ec2:StartInstances"], arns("instance"),
         {"StringNotEquals": {"ec2:InstanceType": sorted(config.instance_types)}})
-    add("DenyLaunchProfile", "Deny", ["ec2:RunInstances"], arns("instance"),
-        {"Null": {"ec2:InstanceProfile": "false"}})
-    add("DenyLaunchTemplate", "Deny", ["ec2:RunInstances"], arns("instance"),
-        {"Null": {"ec2:LaunchTemplate": "false"}})
+    if launch is None:
+        add("DenyLaunchProfile", "Deny", ["ec2:RunInstances"], arns("instance"),
+            {"Null": {"ec2:InstanceProfile": "false"}})
+        add("DenyLaunchTemplate", "Deny", ["ec2:RunInstances"], arns("instance"),
+            {"Null": {"ec2:LaunchTemplate": "false"}})
+    else:
+        # These evaluate the resolved launch values, independently of whether
+        # they came from a template or caller overrides. Template versions and
+        # profile associations remain admin-only through DenyOtherEc2Actions.
+        add("DenyMissingOrForeignLaunchProfile", "Deny", ["ec2:RunInstances"], arns("instance"),
+            {"ArnNotEquals": {"ec2:InstanceProfile": profile_arn}})
+        template_condition = {"StringNotEquals": {"ec2:LaunchTemplate": template_arns}}
+        if not launch.require_template:
+            template_condition["Null"] = {"ec2:LaunchTemplate": "false"}
+        add("DenyUnapprovedMemberLaunchTemplate", "Deny", ["ec2:RunInstances"], arns("instance"), template_condition)
+        add("DenyImdsV1Launch", "Deny", ["ec2:RunInstances"], arns("instance"),
+            {"StringNotEquals": {"ec2:MetadataHttpTokens": "required"}})
     # Unlike CreateNetworkInterface, RunInstances can refer to an existing ENI.
     # Never permit that source path, even if a competing Allow is introduced.
     add("DenyExistingLaunchInterface", "Deny", ["ec2:RunInstances"], arns("network-interface"),

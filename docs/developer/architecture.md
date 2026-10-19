@@ -7,8 +7,10 @@ src/aws_audit/
   cli.py
   audit/
   cost/
+  ec2_access/
   hpc/
   inventory/
+  member_access/
   s3_access/
   tools/
 ```
@@ -27,6 +29,7 @@ The top-level command dispatches to domain modules:
 aws-audit audit-setup    -> aws_audit.audit.setup
 aws-audit hpc            -> aws_audit.hpc.workflow
 aws-audit inventory      -> aws_audit.inventory.tables
+aws-audit member-access  -> aws_audit.member_access.cli
 aws-audit monthly-costs  -> aws_audit.cost.monthly_compute
 aws-audit s3-access      -> aws_audit.s3_access.reconcile
 aws-audit visual-check   -> aws_audit.tools.check_visual_layout
@@ -34,6 +37,14 @@ aws-audit visual-check   -> aws_audit.tools.check_visual_layout
 
 The dispatcher is intentionally thin. Each domain module keeps its own parser and
 implementation.
+
+`member_access` separates configuration models, S3-only role policy state,
+metadata reconciliation, the Lambda runtime and offline deployment rendering.
+The deployed runtime derives members from IAM and home ownership from bucket
+tags; the approved SSM configuration contains infrastructure only. It uses the
+same launch-request and EC2 policy builders as the local tooling. See
+[member launch automation](../admin/member_launch_automation.md) for the trust
+boundary, serialized event handling and lifecycle behavior.
 
 ## Generated Files
 

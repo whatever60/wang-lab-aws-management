@@ -826,14 +826,23 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("config/s3_access_manifest.local.json"),
     )
+    parser.add_argument(
+        "--sync-member-access", action="store_true",
+        help="After apply, immediately synchronize the deployed personal launch templates and instance roles.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     """Run the command-line entry point."""
     args = parse_args()
+    if args.sync_member_access and args.command != "apply":
+        raise ValueError("--sync-member-access requires apply")
     manifest = load_manifest(args.manifest)
     reconcile(manifest, args.command == "apply")
+    if args.sync_member_access:
+        from aws_audit.member_access.cli import sync
+        print(json.dumps({"member_access": sync()}, sort_keys=True))
 
 
 if __name__ == "__main__":

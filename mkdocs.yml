@@ -26,11 +26,13 @@ theme:
 nav:
   - Home: index.md
   - User Guides:
+      - EC2 Console Launch: user/ec2_launch.md
       - HPC Jobs: user/hpc_jobs.md
       - Inventory And Costs: user/inventory_and_costs.md
   - Admin Runbooks:
       - Lab Member Lifecycle: admin/lab_member_lifecycle.md
       - EC2 Member Access: admin/ec2_member_access.md
+      - Member Launch Automation: admin/member_launch_automation.md
       - ParallelCluster HPC: admin/parallelcluster_hpc.md
       - HPC User Lifecycle: admin/hpc_user_lifecycle.md
       - Audit Alert Setup: admin/audit_setup.md

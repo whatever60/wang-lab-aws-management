@@ -13,6 +13,7 @@ from dataclasses import asdict, replace
 from datetime import datetime
 
 from aws_audit.ec2_access import MemberEc2Config, SharedGrant, build_policy_bundle, config_from_mapping, policy_size
+from aws_audit.ec2_access.policy import MemberLaunchConfig
 
 
 ACCOUNT = "123456789012"
@@ -27,6 +28,10 @@ SNAPSHOT = "arn:aws:ec2:" + REGION + "::snapshot/snap-11111111111111111"
 SUBNET = BASE + "subnet/subnet-11111111111111111"
 SG = BASE + "security-group/sg-11111111111111111"
 ALICE = "arn:aws:iam::" + ACCOUNT + ":user/Alice"
+TEMPLATE_KEYS = ("MemberLaunchUbuntu2404", "MemberLaunchAl2023", "MemberLaunchDL2204", "MemberLaunchDL2404")
+TEMPLATES = tuple(BASE + "launch-template/lt-" + ("%017x" % item) for item in range(1, 5))
+PROFILE = "arn:aws:iam::" + ACCOUNT + ":instance-profile/wanglab/member-s3/Alice"
+ROLE = "arn:aws:iam::" + ACCOUNT + ":role/wanglab/member-s3/Alice"
 
 
 def config():
@@ -51,8 +56,10 @@ def condition_matches(condition, context):
                 passed = any(str(item) in wanted for item in actual)
             elif operator in ("StringNotEquals", "ArnNotEquals"):
                 passed = all(str(item) not in wanted for item in actual)
-            elif operator == "StringLike":
+            elif operator in ("StringLike", "StringNotLike"):
                 passed = any(fnmatch.fnmatchcase(str(item), pattern) for item in actual for pattern in wanted)
+                if operator == "StringNotLike":
+                    passed = not passed
             elif operator == "ForAllValues:StringEquals":
                 passed = all(str(item) in wanted for item in actual)
             elif operator == "ForAnyValue:StringNotEquals":
@@ -80,9 +87,24 @@ def decision(bundle, action, resource="*", context=None, competing_allow=False):
                 continue
             if "NotAction" in statement and matches(statement["NotAction"], action):
                 continue
-            if "Resource" in statement and not matches(statement["Resource"], resource):
+            # IAM variables that cannot resolve can invalidate a statement.
+            # Model the whole resource list as unusable, rather than replacing
+            # a missing variable with a wildcard. Separate variable-free Denies
+            # must still protect incomplete onboarding and offboarding.
+            resource_key = "Resource" if "Resource" in statement else "NotResource"
+            patterns = []
+            unresolved = False
+            for pattern in values(statement[resource_key]):
+                variables = re.findall(r"\$\{([^}]+)\}", pattern)
+                if any(key not in context or not context[key] for key in variables):
+                    unresolved = True
+                    break
+                patterns.append(re.sub(r"\$\{([^}]+)\}", lambda match: str(context[match.group(1)]), pattern))
+            if unresolved:
                 continue
-            if "NotResource" in statement and matches(statement["NotResource"], resource):
+            if "Resource" in statement and not matches(patterns, resource):
+                continue
+            if "NotResource" in statement and matches(patterns, resource):
                 continue
             if not condition_matches(statement.get("Condition", {}), context):
                 continue
@@ -104,6 +126,14 @@ def tagged(**extra):
 
 def owned(**extra):
     return member_context(**{"ec2:ResourceTag/Owner": "Alice", **extra})
+
+
+def managed_member_context(**extra):
+    return tagged(**{"aws:PrincipalTag/AccessRole": "CurrentMember", "aws:PrincipalTag/HomeBucket": "member-home",
+                      **{"aws:PrincipalTag/" + key: arn for key, arn in zip(TEMPLATE_KEYS, TEMPLATES)},
+                      "ec2:InstanceType": "g6.xlarge", "ec2:InstanceMarketType": "on-demand", "ec2:Tenancy": "default",
+                      "ec2:MetadataHttpTokens": "required", "ec2:InstanceProfile": PROFILE,
+                      "ec2:LaunchTemplate": TEMPLATES[0], **extra})
 
 
 class MemberEc2PolicyTest(unittest.TestCase):
@@ -307,7 +337,7 @@ class MemberEc2PolicyTest(unittest.TestCase):
         data = json.loads(json.dumps(asdict(config())))
         self.assertEqual(config_from_mapping(data), config())
         for key in data:
-            if key == "shared_grants":
+            if key in ("shared_grants", "member_launch"):
                 continue
             missing = dict(data)
             missing.pop(key)
@@ -325,6 +355,125 @@ class MemberEc2PolicyTest(unittest.TestCase):
             build_policy_bundle(replace(config(), approved_snapshot_arns=snapshots))
         with self.assertRaisesRegex(ValueError, "six group attachments"):
             build_policy_bundle(config(), max_policy_size=1500)
+
+
+class MemberTemplatePolicyTest(unittest.TestCase):
+    def setUp(self):
+        self.config = replace(config(), member_launch=MemberLaunchConfig("/wanglab/member-s3/", "/wanglab/member-s3/", TEMPLATE_KEYS))
+        self.bundle = build_policy_bundle(self.config)
+
+    def check(self, expected, action, resource, context=None, broad=False):
+        self.assertEqual(expected, decision(self.bundle, action, resource,
+                                          managed_member_context() if context is None else context, broad),
+                         (action, resource, context, broad))
+
+    def test_own_templates_profile_and_ec2_passrole_enable_native_launch(self):
+        context = managed_member_context()
+        for template in TEMPLATES:
+            changed = {**context, "ec2:LaunchTemplate": template}
+            for resource in (INSTANCE, VOLUME, IMAGE, SNAPSHOT, SUBNET, SG):
+                self.check("allowed", "ec2:RunInstances", resource, changed)
+            self.check("allowed", "ec2:RunInstances", INTERFACE, {**changed, "ec2:NetworkInterfaceID": "*"})
+            self.check("allowed", "ec2:RunInstances", template, {**changed, "ec2:ResourceTag/Owner": "Alice"})
+            self.check("allowed", "ec2:RunInstances", KEY, {**changed, "ec2:ResourceTag/Owner": "Alice"})
+        self.check("allowed", "iam:PassRole", ROLE, {**context, "iam:PassedToService": "ec2.amazonaws.com"})
+        self.check("allowed", "iam:ListInstanceProfiles", "*", {})
+        iam_context = {key: value for key, value in context.items() if not key.startswith("ec2:")}
+        self.check("allowed", "iam:PassRole", ROLE, {**iam_context, "iam:PassedToService": "ec2.amazonaws.com"})
+        self.check("allowed", "iam:GetInstanceProfile", PROFILE, iam_context)
+        self.check("allowed", "iam:GetRole", ROLE, iam_context)
+
+    def test_other_templates_profiles_and_roles_cannot_bypass_even_with_broad_allow(self):
+        context = managed_member_context()
+        foreign_template = BASE + "launch-template/lt-fffffffffffffffff"
+        self.check("explicitDeny", "ec2:RunInstances", foreign_template,
+                   {**context, "ec2:LaunchTemplate": foreign_template, "ec2:ResourceTag/Owner": "Bob"}, broad=True)
+        self.check("explicitDeny", "ec2:RunInstances", INSTANCE,
+                   {**context, "ec2:LaunchTemplate": foreign_template}, broad=True)
+        self.check("explicitDeny", "ec2:RunInstances", INSTANCE,
+                   {**context, "ec2:InstanceProfile": PROFILE.replace("Alice", "Bob")}, broad=True)
+        self.check("explicitDeny", "iam:PassRole", ROLE.replace("Alice", "Bob"),
+                   {**context, "iam:PassedToService": "ec2.amazonaws.com"}, broad=True)
+        for service in (None, "lambda.amazonaws.com", "cloudformation.amazonaws.com"):
+            changed = dict(context)
+            if service:
+                changed["iam:PassedToService"] = service
+            self.check("explicitDeny", "iam:PassRole", ROLE, changed, broad=True)
+
+    def test_required_template_and_profile_cannot_be_removed(self):
+        for key in ("ec2:LaunchTemplate", "ec2:InstanceProfile"):
+            context = managed_member_context()
+            context.pop(key)
+            self.check("explicitDeny", "ec2:RunInstances", INSTANCE, context, broad=True)
+        self.bundle = build_policy_bundle(replace(self.config, member_launch=replace(self.config.member_launch, require_template=False)))
+        context = managed_member_context()
+        context.pop("ec2:LaunchTemplate")
+        self.check("allowed", "ec2:RunInstances", INSTANCE, context)
+        context.pop("ec2:InstanceProfile")
+        self.check("explicitDeny", "ec2:RunInstances", INSTANCE, context, broad=True)
+
+    def test_template_overrides_still_enforce_existing_independent_guards(self):
+        context = managed_member_context()
+        for key, value in (("ec2:InstanceType", "p5.48xlarge"), ("ec2:Region", "us-east-2"),
+                           ("aws:RequestTag/Owner", "Bob"), ("aws:RequestTag/Project", "shared"),
+                           ("ec2:MetadataHttpTokens", "optional"), ("ec2:InstanceMarketType", "spot"),
+                           ("ec2:Tenancy", "host")):
+            self.check("explicitDeny", "ec2:RunInstances", INSTANCE, {**context, key: value}, broad=True)
+        for source in (IMAGE.replace("ami-111", "ami-999"), SG.replace("sg-111", "sg-999"), SUBNET.replace("subnet-111", "subnet-999")):
+            self.check("explicitDeny", "ec2:RunInstances", source, context, broad=True)
+        self.check("explicitDeny", "ec2:RunInstances", VOLUME, {**context, "ec2:VolumeSize": 1025}, broad=True)
+        self.check("explicitDeny", "ec2:RunInstances", VOLUME,
+                   {**context, "ec2:ParentSnapshot": SNAPSHOT.replace("snap-111", "snap-999")}, broad=True)
+        self.check("explicitDeny", "ec2:RunInstances", INTERFACE, {**context, "ec2:NetworkInterfaceID": "eni-99999999999999999"}, broad=True)
+
+    def test_missing_identity_or_any_template_tag_fails_closed_despite_variable_invalidation(self):
+        for key in ("aws:username", "aws:PrincipalTag/AccessRole", "aws:PrincipalTag/HomeBucket") + tuple("aws:PrincipalTag/" + key for key in TEMPLATE_KEYS):
+            for value in (None, ""):
+                context = managed_member_context(**{"iam:PassedToService": "ec2.amazonaws.com"})
+                if value is None:
+                    context.pop(key)
+                else:
+                    context[key] = value
+                for action, resource in (("ec2:RunInstances", INSTANCE), ("iam:PassRole", ROLE)):
+                    self.check("explicitDeny", action, resource, context, broad=True)
+        context = managed_member_context(**{"aws:PrincipalTag/AccessRole": "Alumni"})
+        self.check("explicitDeny", "ec2:RunInstances", INSTANCE, context, broad=True)
+        for value in ("not-an-arn", TEMPLATES[0].replace(ACCOUNT, "999999999999"), TEMPLATES[0].replace(REGION, "us-east-2")):
+            context = managed_member_context(**{"aws:PrincipalTag/" + TEMPLATE_KEYS[0]: value})
+            self.check("explicitDeny", "ec2:RunInstances", INSTANCE, context, broad=True)
+
+    def test_user_cannot_self_enable_tags_or_change_templates_profiles_or_roles(self):
+        for action in ("iam:TagUser", "iam:UntagUser", "sts:TagSession", "sts:AssumeRole",
+                       "iam:AddRoleToInstanceProfile", "iam:RemoveRoleFromInstanceProfile", "iam:TagInstanceProfile",
+                       "iam:PutRolePolicy", "iam:AttachRolePolicy", "iam:UpdateAssumeRolePolicy",
+                       "ec2:CreateLaunchTemplate", "ec2:CreateLaunchTemplateVersion", "ec2:ModifyLaunchTemplate",
+                       "ec2:DeleteLaunchTemplateVersions", "ec2:ReplaceIamInstanceProfileAssociation", "ec2:AssociateIamInstanceProfile"):
+            context = managed_member_context() if action.startswith("ec2:") else {}
+            self.check("explicitDeny", action, "*", context, broad=True)
+        # Clearing template tags blocks new launches; it does not stop existing
+        # jobs or remove owned lifecycle permissions during staged maintenance.
+        self.check("allowed", "ec2:StartInstances", INSTANCE, owned(**{"ec2:InstanceType": "g6.xlarge"}))
+
+    def test_new_member_uses_same_documents_without_roster_or_policy_rewrite(self):
+        context = managed_member_context(**{"aws:username": "Bob", "aws:RequestTag/Owner": "Bob",
+                                             "ec2:InstanceProfile": PROFILE.replace("Alice", "Bob")})
+        for key, arn in zip(TEMPLATE_KEYS, TEMPLATES):
+            context["aws:PrincipalTag/" + key] = arn.replace("lt-000", "lt-aaa")
+        context["ec2:LaunchTemplate"] = context["aws:PrincipalTag/" + TEMPLATE_KEYS[0]]
+        self.check("allowed", "ec2:RunInstances", INSTANCE, context)
+        self.check("allowed", "ec2:RunInstances", context["ec2:LaunchTemplate"], {**context, "ec2:ResourceTag/Owner": "Bob"})
+        self.check("allowed", "iam:PassRole", ROLE.replace("Alice", "Bob"), {**context, "iam:PassedToService": "ec2.amazonaws.com"})
+        self.check("explicitDeny", "iam:PassRole", ROLE, {**context, "iam:PassedToService": "ec2.amazonaws.com"}, broad=True)
+
+    def test_member_launch_json_schema_and_paths_fail_closed(self):
+        import json
+        data = json.loads(json.dumps(asdict(self.config)))
+        self.assertEqual(config_from_mapping(data), self.config)
+        for changes in ({"role_path": "/"}, {"instance_profile_path": "/wanglab/*/"},
+                        {"template_tag_keys": []}, {"template_tag_keys": ["Tag", "Tag"]},
+                        {"template_tag_keys": ["aws:Admin"]}, {"require_template": "true"}, {"allow_any_role": True}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                config_from_mapping({**data, "member_launch": {**data["member_launch"], **changes}})
 
 
 if __name__ == "__main__":

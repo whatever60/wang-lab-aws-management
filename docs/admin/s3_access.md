@@ -45,6 +45,21 @@ Apply:
 uv run aws-audit s3-access apply
 ```
 
+When the member-launch controller is deployed, synchronize personal instance
+roles and launch templates immediately after a successful apply:
+
+```bash
+uv run aws-audit s3-access apply --sync-member-access
+```
+
+This invokes the serialized deployed reconciler after S3 reconciliation succeeds.
+It requires permission to invoke that Lambda and is rejected with `plan`.
+The controller also watches IAM membership/tag changes and runs every five
+minutes; it derives current membership and home ownership from live metadata.
+Its SSM configuration contains approved infrastructure rather than a user roster.
+See [member launch automation](member_launch_automation.md) for the role boundary,
+already-issued-session revocation and operational checks.
+
 Use `--manifest` to point at another local manifest:
 
 ```bash
