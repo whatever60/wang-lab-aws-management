@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional, TextIO
 
+from . import lifecycle, user_sync
+
 
 DEFAULT_MANIFEST_PATH = Path("config/hpc_workflow_manifest.json")
 PRICING_REGION = "us-east-1"
@@ -123,8 +125,12 @@ def linux_user_from_iam_user(user_name: str) -> str:
     base = base.replace("-", "_")
     base = re.sub(r"[^A-Za-z0-9_]", "_", base)
     base = re.sub(r"_+", "_", base).strip("_").lower()
+    if not base:
+        raise ValueError(f"IAM name has no Linux user component: {user_name}")
     if not base[0].isalpha():
         base = f"u_{base}"
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", base):
+        raise ValueError(f"Invalid or overlong Linux user for {user_name}")
     return base
 
 
@@ -150,18 +156,46 @@ def selected_iam_users(manifest: dict[str, Any]) -> list[str]:
     return sorted(users, key=linux_user_from_iam_user)
 
 
+def iam_user_tags(user_name: str) -> dict[str, str]:
+    """Return IAM user tags as a dictionary."""
+    data = run_json(
+        [
+            "aws",
+            "iam",
+            "list-user-tags",
+            "--user-name",
+            user_name,
+        ]
+    )
+    return {tag["Key"]: tag["Value"] for tag in data["Tags"]}
+
+
+def hpc_uid_for_iam_user(user_name: str, uid_tag: str) -> int:
+    """Return the explicit ParallelCluster Linux UID for an IAM user."""
+    value = iam_user_tags(user_name).get(uid_tag, "")
+    if not re.fullmatch(r"[0-9]+", value) or not user_sync.MIN_UID <= int(value) <= user_sync.MAX_UID:
+        raise ValueError(f"{user_name} requires a unique {uid_tag} in {user_sync.MIN_UID}..{user_sync.MAX_UID}")
+    return int(value)
+
+
 def lab_users_from_iam(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     """Build Linux user records from selected IAM users."""
-    starting_uid = manifest["iam_user_selection"]["starting_uid"]
+    uid_tag = manifest["iam_user_selection"]["uid_tag"]
     rows: list[dict[str, Any]] = []
-    for index, iam_user in enumerate(selected_iam_users(manifest)):
+    for iam_user in selected_iam_users(manifest):
+        tags = iam_user_tags(iam_user)
+        if tags.get("AccessRole") not in {"CurrentMember", "Admin"}:
+            continue
         rows.append(
             {
                 "iam_user": iam_user,
                 "linux_user": linux_user_from_iam_user(iam_user),
-                "uid": starting_uid + index,
+                "uid": hpc_uid_for_iam_user(iam_user, uid_tag),
             }
         )
+    user_sync.validate_registry({"schema_version": 1, "cluster_name": "identity-validation",
+                                 "users": [dict(row, active=False, public_keys=[]) for row in rows]},
+                                "identity-validation")
     return rows
 
 
@@ -360,8 +394,8 @@ def bootstrap_upload_command(manifest: dict[str, Any]) -> list[str]:
         "aws",
         "s3",
         "cp",
-        pcluster["bootstrap_script_local_path"],
-        pcluster["bootstrap_script_s3_uri"],
+        str(lifecycle.release_asset(manifest, "bootstrap")[0]),
+        lifecycle.release_asset(manifest, "bootstrap")[1],
     ]
 
 
@@ -381,6 +415,7 @@ def bootstrap_upload_commands(manifest: dict[str, Any]) -> list[list[str]]:
     """Build all AWS CLI commands needed to upload node bootstrap assets."""
     return [
         bootstrap_upload_command(manifest),
+        ["aws", "s3", "cp", str(lifecycle.release_asset(manifest, "runtime")[0]), lifecycle.release_asset(manifest, "runtime")[1]],
         active_instance_types_upload_command(manifest),
     ]
 
@@ -441,7 +476,7 @@ def provision_plan_commands(manifest: dict[str, Any]) -> list[tuple[str, list[st
         commands.append(("submit Slurm smoke test", command))
     commands.append(
         (
-            "delete cluster and tagged test storage after validation",
+            "delete cluster (retained storage remains)",
             [
                 "uv",
                 "run",
@@ -815,16 +850,12 @@ def shared_storage_config(manifest: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def custom_action_config(manifest: dict[str, Any], users: list[dict[str, Any]], head: bool) -> dict[str, Any]:
-    """Build a ParallelCluster custom action for node user bootstrap."""
-    args = [user_spec(users)]
-    if head:
-        args.append("--enforce-head-login-limits")
-    return {
-        "OnNodeConfigured": {
-            "Script": manifest["parallelcluster"]["bootstrap_script_s3_uri"],
-            "Args": args,
-        }
-    }
+    """Every new node installs the current versioned registry and periodic reconciler."""
+    return {"OnNodeConfigured": {
+        "Script": lifecycle.release_asset(manifest, "bootstrap")[1],
+        "Args": ["--sync-users", manifest["user_lifecycle"]["current_s3_uri"],
+                 manifest["parallelcluster"]["cluster_name"], "head" if head else "compute"],
+    }}
 
 
 def head_custom_action_config(manifest: dict[str, Any], users: list[dict[str, Any]]) -> dict[str, Any]:
@@ -832,7 +863,7 @@ def head_custom_action_config(manifest: dict[str, Any], users: list[dict[str, An
     configured = custom_action_config(manifest, users, True)["OnNodeConfigured"]
     return {
         "OnNodeStart": {
-            "Script": manifest["parallelcluster"]["bootstrap_script_s3_uri"],
+            "Script": lifecycle.release_asset(manifest, "bootstrap")[1],
             "Args": [
                 "--install-slurm-policy-only",
                 manifest["parallelcluster"]["active_instance_types_s3_uri"],
@@ -872,6 +903,7 @@ def queue_config(
         "Iam": {
             "AdditionalIamPolicies": [
                 {"Policy": pcluster["assets_read_policy_arn"]},
+                {"Policy": "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"},
             ]
         },
         "ComputeResources": compute_resources,
@@ -898,6 +930,8 @@ def generated_cluster_config(manifest: dict[str, Any]) -> dict[str, Any]:
         "Tags": [
             {"Key": "Project", "Value": pcluster["cluster_name"]},
             {"Key": "ManagedBy", "Value": "aws-parallelcluster"},
+            {"Key": "aws-audit:storage-purpose", "Value": manifest["storage_management"]["purpose"]},
+            {"Key": "aws-audit:storage-lifecycle", "Value": "Delete" if all(item["deletion_policy"] == "Delete" for item in manifest["storage"]) else "Retain"},
         ],
         "HeadNode": {
             "InstanceType": head_node_instance_type(manifest),
@@ -922,6 +956,7 @@ def generated_cluster_config(manifest: dict[str, Any]) -> dict[str, Any]:
             "Iam": {
                 "AdditionalIamPolicies": [
                     {"Policy": pcluster["assets_read_policy_arn"]},
+                    {"Policy": "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"},
                 ]
             },
         },
@@ -1051,7 +1086,9 @@ def tagged_efs_ids(manifest: dict[str, Any]) -> list[str]:
             "--query",
             (
                 "FileSystems[?Tags[?Key==`parallelcluster:cluster-name` "
-                f"&& Value==`{pcluster['cluster_name']}`]].FileSystemId"
+                f"&& Value==`{pcluster['cluster_name']}`] && "
+                "Tags[?Key==`aws-audit:storage-purpose` && Value==`test`] && "
+                "Tags[?Key==`aws-audit:storage-lifecycle` && Value==`Delete`]].FileSystemId"
             ),
         ]
     )
@@ -1071,7 +1108,9 @@ def tagged_fsx_ids(manifest: dict[str, Any]) -> list[str]:
             "--query",
             (
                 "FileSystems[?Tags[?Key==`parallelcluster:cluster-name` "
-                f"&& Value==`{pcluster['cluster_name']}`]].FileSystemId"
+                f"&& Value==`{pcluster['cluster_name']}`] && "
+                "Tags[?Key==`aws-audit:storage-purpose` && Value==`test`] && "
+                "Tags[?Key==`aws-audit:storage-lifecycle` && Value==`Delete`]].FileSystemId"
             ),
         ]
     )
@@ -1139,6 +1178,10 @@ def delete_efs_file_system(manifest: dict[str, Any], file_system_id: str) -> Non
 
 def cleanup_tagged_storage(manifest: dict[str, Any]) -> None:
     """Delete tagged EFS and FSx storage left behind by test clusters."""
+    policy = manifest.get("storage_management", {})
+    if (not policy.get("allow_cleanup", False) or policy.get("purpose") != "test"
+            or any(item["deletion_policy"] != "Delete" for item in manifest["storage"])):
+        raise ValueError("Storage cleanup requires an explicit test manifest, all Delete policies, and allow_cleanup=true")
     region = manifest["parallelcluster"]["region"]
     for file_system_id in tagged_fsx_ids(manifest):
         run_command(
@@ -1270,6 +1313,7 @@ def handle_render_provision_plan(args: argparse.Namespace) -> None:
 def handle_execute_pcluster_dryrun(args: argparse.Namespace) -> None:
     """Handle the execute-pcluster-dryrun subcommand."""
     manifest = load_configured_manifest(args)
+    lifecycle.ensure_published_users(manifest, lab_users_from_iam(manifest))
     write_generated_config(manifest)
     run_bootstrap_upload_commands(manifest)
     completed = subprocess.run(
@@ -1291,6 +1335,7 @@ def handle_execute_pcluster_dryrun(args: argparse.Namespace) -> None:
 def handle_create_cluster(args: argparse.Namespace) -> None:
     """Handle the create-cluster subcommand."""
     manifest = load_configured_manifest(args)
+    lifecycle.ensure_published_users(manifest, lab_users_from_iam(manifest))
     write_generated_config(manifest)
     run_bootstrap_upload_commands(manifest)
     run_command(pcluster_create_command(manifest, False))
@@ -1301,6 +1346,8 @@ def handle_create_cluster(args: argparse.Namespace) -> None:
 def handle_delete_cluster(args: argparse.Namespace) -> None:
     """Handle the delete-cluster subcommand."""
     manifest = load_manifest(args.manifest)
+    if args.cleanup_storage and not args.wait:
+        raise ValueError("Storage cleanup requires waiting for cluster deletion")
     run_command(pcluster_delete_command(manifest))
     if args.wait:
         wait_for_cluster_absent(manifest, args.timeout_seconds)
@@ -1312,6 +1359,17 @@ def handle_cleanup_storage(args: argparse.Namespace) -> None:
     """Handle the cleanup-storage subcommand."""
     manifest = load_manifest(args.manifest)
     cleanup_tagged_storage(manifest)
+
+
+def handle_publish_users(args: argparse.Namespace) -> None:
+    manifest = load_manifest(args.manifest)
+    result = lifecycle.publish_users(manifest, lab_users_from_iam(manifest), args.preview_path, args.execute,
+                                     args.approved_preview_sha256)
+    print(json.dumps(result, indent=2))
+
+
+def handle_sync_users(args: argparse.Namespace) -> None:
+    print(json.dumps(lifecycle.rollout_users(load_manifest(args.manifest), args.execute), indent=2))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1326,6 +1384,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the AWS HPC workflow manifest.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    publish_parser = subparsers.add_parser("publish-users", help="Prepare public user registry; --execute publishes a versioned S3 release.")
+    publish_parser.add_argument("--preview-path", type=Path, default=Path("outputs/hpc/users-preview.json"))
+    publish_parser.add_argument("--execute", action="store_true")
+    publish_parser.add_argument("--approved-preview-sha256", default="",
+                                help="Required with --execute: exact digest printed by the reviewed publish-users preview.")
+    publish_parser.set_defaults(func=handle_publish_users)
+
+    sync_parser = subparsers.add_parser("sync-users", help="Preview cluster-tagged targets; --execute installs/syncs them with SSM.")
+    sync_parser.add_argument("--execute", action="store_true")
+    sync_parser.set_defaults(func=handle_sync_users)
 
     describe_parser = subparsers.add_parser(
         "describe", help="Print the ParallelCluster workflow plan."
@@ -1420,16 +1489,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     delete_parser = subparsers.add_parser(
         "delete-cluster",
-        help="Delete the cluster and clean tagged test storage.",
+        help="Delete the cluster; preserve retained storage.",
     )
     delete_parser.add_argument("--no-wait", action="store_false", dest="wait")
-    delete_parser.add_argument("--no-cleanup-storage", action="store_false", dest="cleanup_storage")
+    delete_parser.add_argument("--cleanup-storage", action="store_true", help="Also remove explicitly tagged disposable test storage.")
     delete_parser.add_argument("--timeout-seconds", type=int, default=3600)
-    delete_parser.set_defaults(func=handle_delete_cluster, wait=True, cleanup_storage=True)
+    delete_parser.set_defaults(func=handle_delete_cluster, wait=True, cleanup_storage=False)
 
     cleanup_parser = subparsers.add_parser(
         "cleanup-storage",
-        help="Delete EFS/FSx resources tagged for this test cluster.",
+        help="Delete only opt-in disposable test EFS/FSx resources.",
     )
     cleanup_parser.set_defaults(func=handle_cleanup_storage)
 

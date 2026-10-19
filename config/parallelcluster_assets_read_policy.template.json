@@ -4,27 +4,14 @@
     {
       "Effect": "Allow",
       "Action": [
-        "s3:GetObject"
+        "s3:GetObject",
+        "s3:GetObjectVersion"
       ],
       "Resource": [
-        "arn:aws:s3:::${PARALLELCLUSTER_ASSETS_BUCKET}/parallelcluster-assets/*"
+        "arn:aws:s3:::${PARALLELCLUSTER_ASSETS_BUCKET}/parallelcluster-assets/users/current.json",
+        "arn:aws:s3:::${PARALLELCLUSTER_ASSETS_BUCKET}/parallelcluster-assets/users/releases/*",
+        "arn:aws:s3:::${PARALLELCLUSTER_ASSETS_BUCKET}/parallelcluster-assets/bootstrap/parallelcluster_active_instance_types.txt"
       ]
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:ListBucket"
-      ],
-      "Resource": [
-        "arn:aws:s3:::${PARALLELCLUSTER_ASSETS_BUCKET}"
-      ],
-      "Condition": {
-        "StringLike": {
-          "s3:prefix": [
-            "parallelcluster-assets/*"
-          ]
-        }
-      }
     }
   ]
 }

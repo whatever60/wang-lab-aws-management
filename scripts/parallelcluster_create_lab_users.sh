@@ -1,17 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LAB_GROUP="hpc-users"
-LAB_GID="2000"
 SLURM_POLICY_TOKEN="--install-slurm-policy-only"
-LOGIN_GUARDRAIL_TOKEN="--enforce-head-login-limits"
-HEAD_LOGIN_LIMIT_CPUS="200%"
-HEAD_LOGIN_LIMIT_MEMORY="16G"
-HEAD_LOGIN_MAX_FILE_SIZE="40G"
-HEAD_LOGIN_LIMIT_PROCS="512"
-HEAD_LOGIN_MAX_SESSIONS="4"
-HEAD_LOGIN_MAX_OPEN_FILES="8192"
-HEAD_LOGIN_CPU_TIME_SECONDS="14400"
 ACTIVE_INSTANCE_TYPES_PATH="/etc/aws-audit/active_instance_types.txt"
 
 install_aws_audit_sbatch_wrapper() {
@@ -173,69 +163,107 @@ if [ "${1-}" = "${SLURM_POLICY_TOKEN}" ]; then
   exit 0
 fi
 
-USER_SPEC="${1}"
-
-if ! getent group "${LAB_GROUP}" >/dev/null; then
-  groupadd --gid "${LAB_GID}" "${LAB_GROUP}"
+# Account state is intentionally fetched at runtime: never freeze IAM users in YAML.
+if [ "${1-}" != "--sync-users" ] || [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
+  echo "Usage: $0 --sync-users <s3-current-uri> <cluster-name> <head|compute> [expected-revision]" >&2
+  exit 2
 fi
 
-enforce_head_limits() {
-  install -d -m 0755 /etc/security/limits.d
-  cat <<EOF >/etc/security/limits.d/95-aws-audit-login-limits.conf
-@${LAB_GROUP} hard nproc ${HEAD_LOGIN_LIMIT_PROCS}
-@${LAB_GROUP} soft nproc $((HEAD_LOGIN_LIMIT_PROCS - 20))
-@${LAB_GROUP} hard fsize ${HEAD_LOGIN_MAX_FILE_SIZE}
-@${LAB_GROUP} soft fsize ${HEAD_LOGIN_MAX_FILE_SIZE}
-@${LAB_GROUP} hard cpu ${HEAD_LOGIN_CPU_TIME_SECONDS}
-@${LAB_GROUP} soft cpu ${HEAD_LOGIN_CPU_TIME_SECONDS}
-@${LAB_GROUP} hard nofile ${HEAD_LOGIN_MAX_OPEN_FILES}
-@${LAB_GROUP} soft nofile ${HEAD_LOGIN_MAX_OPEN_FILES}
-@${LAB_GROUP} hard maxlogins ${HEAD_LOGIN_MAX_SESSIONS}
-EOF
+python3 - "$0" "$2" "$3" "$4" "${5-}" <<'PYTHON'
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
 
-  for item in "${USERS[@]}"; do
-    linux_user="${item%%:*}"
-    user_uid="$(id -u "${linux_user}")"
-    dropin_dir="/etc/systemd/system/user-${user_uid}.slice.d"
-    dropin_file="${dropin_dir}/95-aws-audit-login-limits.conf"
-    mkdir -p "${dropin_dir}"
-    cat <<EOF >/tmp/pc-head-login.slice.conf
-[Slice]
-CPUAccounting=yes
-CPUQuota=${HEAD_LOGIN_LIMIT_CPUS}
-MemoryAccounting=yes
-MemoryMax=${HEAD_LOGIN_LIMIT_MEMORY}
-TasksAccounting=yes
-TasksMax=${HEAD_LOGIN_LIMIT_PROCS}
-EOF
-    cat /tmp/pc-head-login.slice.conf >"${dropin_file}"
-  done
+bootstrap, uri, cluster, role, expected = sys.argv[1:]
+if os.geteuid() != 0:
+    raise SystemExit("HPC lifecycle bootstrap requires root")
+# Standard Ubuntu AMIs may package the agent either as a systemd or snap service.
+if not any(subprocess.run(["systemctl", "is-active", "--quiet", service], check=False).returncode == 0
+           for service in ["amazon-ssm-agent", "snap.amazon-ssm-agent.amazon-ssm-agent"]):
+    raise SystemExit("An active Amazon SSM Agent service is required; provision the AMI/agent and retry")
+if not re.fullmatch(r"s3://[a-z0-9.-]+/[A-Za-z0-9._/-]+", uri):
+    raise SystemExit("Expected a concrete S3 lifecycle URI")
+if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{0,59}", cluster) or role not in {"head", "compute"}:
+    raise SystemExit("Invalid cluster/node role")
+if expected and not re.fullmatch(r"[0-9a-f]{64}", expected):
+    raise SystemExit("Invalid expected revision")
+bucket, current_key = uri[5:].split("/", 1)
+runtime = None
+base_args = ["--manifest-uri", uri, "--cluster-name", cluster, "--node-role", role]
 
-  rm -f /tmp/pc-head-login.slice.conf
-  systemctl daemon-reload
-}
+def fetch(key, path, version=""):
+    command = ["aws", "s3api", "get-object", "--bucket", bucket, "--key", key]
+    if version:
+        command += ["--version-id", version]
+    result = subprocess.run(command + [str(path)], check=True, capture_output=True, text=True)
+    metadata = json.loads(result.stdout)
+    if metadata.get("VersionId") in {None, "", "null"}:
+        raise ValueError("Lifecycle bucket must have versioning enabled")
 
-IFS=',' read -ra USERS <<< "${USER_SPEC}"
-for item in "${USERS[@]}"; do
-  linux_user="${item%%:*}"
-  uid="${item##*:}"
-  if ! id "${linux_user}" >/dev/null 2>&1; then
-    useradd \
-      --uid "${uid}" \
-      --gid "${LAB_GROUP}" \
-      --create-home \
-      --shell /bin/bash \
-      "${linux_user}"
-  fi
-  usermod --append --groups "${LAB_GROUP}" "${linux_user}"
-  install -d -m 0700 -o "${linux_user}" -g "${LAB_GROUP}" "/home/${linux_user}/.ssh"
-  touch "/home/${linux_user}/.ssh/authorized_keys"
-  chown "${linux_user}:${LAB_GROUP}" "/home/${linux_user}/.ssh/authorized_keys"
-  chmod 0600 "/home/${linux_user}/.ssh/authorized_keys"
-done
+def atomic(path, content, mode=0o644):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError("Refusing managed path symlink")
+    fd, temporary = tempfile.mkstemp(dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            os.fchmod(handle.fileno(), mode)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
-if [ "${2-}" = "${LOGIN_GUARDRAIL_TOKEN}" ]; then
-  enforce_head_limits
-fi
+try:
+    with tempfile.TemporaryDirectory(prefix="hpc-install-", dir="/run") as temporary:
+        directory = Path(temporary)
+        fetch(current_key, directory / "current.json")
+        pointer = json.loads((directory / "current.json").read_text())
+        if pointer.get("schema_version") != 1 or pointer.get("cluster_name") != cluster:
+            raise ValueError("Unexpected lifecycle release")
+        if expected and pointer.get("registry_sha256") != expected:
+            raise ValueError("Roster changed while rollout was dispatched; retry reviewed rollout")
+        if hashlib.sha256(Path(bootstrap).read_bytes()).hexdigest() != pointer.get("bootstrap_sha256"):
+            raise ValueError("Bootstrap release changed; use current published bootstrap")
+        runtime_key = pointer.get("runtime_key", "")
+        if not runtime_key.startswith(current_key.rsplit("/", 1)[0] + "/releases/code/"):
+            raise ValueError("Runtime outside lifecycle prefix")
+        fetch(runtime_key, directory / "runtime.py", pointer["runtime_version_id"])
+        content = (directory / "runtime.py").read_bytes()
+        if hashlib.sha256(content).hexdigest() != pointer.get("runtime_sha256"):
+            raise ValueError("Runtime checksum mismatch")
+        runtime_sha = pointer.get("runtime_sha256", "")
+        if not re.fullmatch(r"[0-9a-f]{64}", runtime_sha):
+            raise ValueError("Invalid runtime content hash")
+        # Immutable installed paths prevent an already-running older interpreter from
+        # mistaking newly replaced source bytes for its own code during an upgrade.
+        runtime = Path("/usr/local/libexec/aws-audit-hpc") / runtime_sha / "user_sync.py"
+        atomic(runtime, content, 0o755)
+    # Run both immediately and every two minutes; the service never reads IAM or EFS keys.
+    command = shlex.join(["/usr/bin/python3", str(runtime), *base_args])
+    service = ("[Unit]\nDescription=Reconcile managed HPC users\nAfter=network-online.target\nWants=network-online.target\n"
+               "[Service]\nType=oneshot\nUser=root\nUMask=0077\nTimeoutStartSec=300\nExecStart=" + command + "\n")
+    timer = ("[Unit]\nDescription=Refresh managed HPC users\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=2min\n"
+             "RandomizedDelaySec=15s\nUnit=aws-audit-hpc-users.service\n[Install]\nWantedBy=timers.target\n")
+    atomic(Path("/etc/systemd/system/aws-audit-hpc-users.service"), service.encode())
+    atomic(Path("/etc/systemd/system/aws-audit-hpc-users.timer"), timer.encode())
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "enable", "--now", "aws-audit-hpc-users.timer"], check=True)
+    subprocess.run(["/usr/bin/python3", str(runtime), *base_args,
+                    *(["--expected-revision", expected] if expected else [])], check=True)
+except Exception:
+    # Keep existing valid access on download/install errors. Fresh nodes have no grants.
+    # The failed service/SSM result is visible to the administrator; retry explicitly.
+    raise
+PYTHON
 
+# Shared scratch remains a data directory; account revocation never removes home data.
 install -d -m 1777 /scratch

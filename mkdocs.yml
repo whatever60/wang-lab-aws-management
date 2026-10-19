@@ -29,7 +29,10 @@ nav:
       - HPC Jobs: user/hpc_jobs.md
       - Inventory And Costs: user/inventory_and_costs.md
   - Admin Runbooks:
+      - Lab Member Lifecycle: admin/lab_member_lifecycle.md
+      - EC2 Member Access: admin/ec2_member_access.md
       - ParallelCluster HPC: admin/parallelcluster_hpc.md
+      - HPC User Lifecycle: admin/hpc_user_lifecycle.md
       - Audit Alert Setup: admin/audit_setup.md
       - S3 Access: admin/s3_access.md
   - Developer Notes:

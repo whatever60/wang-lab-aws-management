@@ -33,7 +33,20 @@ BUCKET_LIST_ACTIONS = [
     "s3:GetLifecycleConfiguration",
 ]
 OBJECT_READ_ACTIONS = ["s3:GetObject", "s3:GetObjectVersion"]
-POLICY_PREFIX = "AwsAuditS3Access"
+ALUMNI_EC2_DESCRIBE_ACTIONS = [
+    "ec2:DescribeInstances",
+    "ec2:DescribeRegions",
+    "ec2:DescribeAvailabilityZones",
+    "ec2:DescribeVpcs",
+    "ec2:DescribeSecurityGroups",
+    "ec2:DescribeSubnets",
+    "ec2:DescribeNetworkInterfaces",
+    "ec2:DescribeImages",
+    "ec2:DescribeSnapshots",
+    "ec2:DescribeVolumes",
+    "ec2:DescribeTags",
+]
+POLICY_PREFIX = "WangLabS3Access"
 READ_POLICY_NAME = f"{POLICY_PREFIX}ReadApproved"
 MEMBER_WRITE_POLICY_NAME = f"{POLICY_PREFIX}CurrentMemberWriteOwn"
 ADMIN_POLICY_NAME = f"{POLICY_PREFIX}AdminWriteSharedOpsAndReadService"
@@ -152,8 +165,59 @@ def current_group_users(group_name: str) -> set[str]:
     return set(users)
 
 
+def validate_manifest_structure(manifest: dict[str, Any]) -> None:
+    """Reject ambiguous roles, names, scopes, and home ownership before AWS reads."""
+    for collection, name_key in [("users", "user_name"), ("buckets", "name")]:
+        rows = manifest.get(collection)
+        if not isinstance(rows, list):
+            raise RuntimeError(f"Manifest {collection} must be a list.")
+        seen: set[str] = set()
+        for row in rows:
+            name = row.get(name_key) if isinstance(row, dict) else None
+            if not isinstance(name, str) or not name.strip():
+                raise RuntimeError(f"Every manifest {collection} entry needs a nonempty {name_key}.")
+            if name in seen:
+                raise RuntimeError(f"Duplicate manifest {collection} name: {name}.")
+            seen.add(name)
+
+    groups = manifest.get("groups", {})
+    if not isinstance(groups, dict):
+        raise RuntimeError("Manifest groups must map admin, current_member, and alumni.")
+    group_names = [groups.get(key) for key in ["admin", "current_member", "alumni"]]
+    if any(not isinstance(name, str) or not name.strip() for name in group_names):
+        raise RuntimeError("Manifest groups must map admin, current_member, and alumni to nonempty names.")
+    if len(set(group_names)) != len(group_names):
+        raise RuntimeError("Manifest role groups must be distinct.")
+
+    users = user_by_name(manifest)
+    buckets = bucket_by_name(manifest)
+    for user in manifest["users"]:
+        if user.get("role") not in ("Admin", "CurrentMember", "Alumni"):
+            raise RuntimeError(f"User {user['user_name']} has invalid role {user.get('role')!r}.")
+        if "home_bucket" in user:
+            home = user["home_bucket"]
+            if not isinstance(home, str) or not home.strip():
+                raise RuntimeError(f"User {user['user_name']} home_bucket must be a nonempty name.")
+            bucket = buckets.get(home)
+            if not bucket or bucket.get("scope") != "User":
+                raise RuntimeError(f"User {user['user_name']} home bucket {home} is not a User bucket.")
+            if bucket.get("owner") != user["user_name"]:
+                raise RuntimeError(f"User {user['user_name']} does not own home bucket {home}.")
+
+    for bucket in manifest["buckets"]:
+        if bucket.get("scope") not in ("User", "SharedOps", "ServiceManaged"):
+            raise RuntimeError(f"Bucket {bucket['name']} has invalid scope {bucket.get('scope')!r}.")
+        if bucket["scope"] == "User":
+            owner = bucket.get("owner")
+            if not isinstance(owner, str) or owner not in users:
+                raise RuntimeError(f"Bucket {bucket['name']} owner {owner!r} is not a user.")
+            if users[owner].get("home_bucket") != bucket["name"]:
+                raise RuntimeError(f"Bucket {bucket['name']} is not its owner {owner}'s home bucket.")
+
+
 def validate_manifest(manifest: dict[str, Any]) -> None:
-    """Validate that manifest users and buckets match the live account."""
+    """Validate the manifest structure and its exact match to the live account."""
+    validate_manifest_structure(manifest)
     users = user_by_name(manifest)
     buckets = bucket_by_name(manifest)
     live_users = current_iam_users()
@@ -171,21 +235,6 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
             f"Missing buckets: {missing_buckets}\n"
             f"Extra buckets: {extra_buckets}"
         )
-
-    for bucket in manifest["buckets"]:
-        if bucket["scope"] == "User":
-            owner = bucket["owner"]
-            if owner not in users:
-                raise RuntimeError(f"Bucket {bucket['name']} owner {owner} is not a user.")
-
-    owned_buckets = {
-        bucket["name"] for bucket in manifest["buckets"] if bucket["scope"] == "User"
-    }
-    for user in manifest["users"]:
-        if "home_bucket" in user and user["home_bucket"] not in owned_buckets:
-            raise RuntimeError(
-                f"User {user['user_name']} home bucket {user['home_bucket']} is not a User bucket."
-            )
 
 
 def expected_group_members(manifest: dict[str, Any], role: str) -> set[str]:
@@ -360,40 +409,37 @@ def admin_policy(manifest: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def alumni_base_policy(manifest: dict[str, Any]) -> dict[str, Any]:
-    """Build replacement alumni base policy with EC2 describe and S3 read-only access."""
-    policy = read_policy(manifest)
-    policy["Statement"].insert(
-        0,
+def alumni_ec2_statements() -> list[dict[str, Any]]:
+    """Build EC2-only guardrails without changing any non-EC2 permissions.
+
+    Every EC2 action supplies ec2:Region. Requiring that service-specific key
+    prevents the NotAction deny from matching requests to unrelated services.
+    Resource '*' also covers EC2 actions without resource-level authorization.
+    """
+    return [
         {
             "Sid": "DenyDirectEc2Mutation",
             "Effect": "Deny",
-            "Action": ["ec2:*"],
+            "NotAction": list(ALUMNI_EC2_DESCRIBE_ACTIONS),
             "Resource": "*",
-            "Condition": {"Bool": {"aws:ViaAWSService": "false"}},
+            "Condition": {
+                "Bool": {"aws:ViaAWSService": "false"},
+                "Null": {"ec2:Region": "false"},
+            },
         },
-    )
-    policy["Statement"].insert(
-        1,
         {
             "Sid": "AllowEc2Describe",
             "Effect": "Allow",
-            "Action": [
-                "ec2:DescribeInstances",
-                "ec2:DescribeRegions",
-                "ec2:DescribeAvailabilityZones",
-                "ec2:DescribeVpcs",
-                "ec2:DescribeSecurityGroups",
-                "ec2:DescribeSubnets",
-                "ec2:DescribeNetworkInterfaces",
-                "ec2:DescribeImages",
-                "ec2:DescribeSnapshots",
-                "ec2:DescribeVolumes",
-                "ec2:DescribeTags",
-            ],
+            "Action": list(ALUMNI_EC2_DESCRIBE_ACTIONS),
             "Resource": "*",
         },
-    )
+    ]
+
+
+def alumni_base_policy(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Build alumni policy with explicit EC2 describe and approved S3 reads."""
+    policy = read_policy(manifest)
+    policy["Statement"] = alumni_ec2_statements() + policy["Statement"]
     return policy
 
 
@@ -593,6 +639,9 @@ def reconcile_bucket_tags(manifest: dict[str, Any], apply: bool) -> list[str]:
 def guardrail_sids() -> set[str]:
     """Return bucket policy statement IDs managed by this reconciler."""
     return {
+        "WangLabDenyWriteUnlessHomeBucketMatches",
+        "WangLabDenyWriteUnlessCurrentMemberOrAdmin",
+        "WangLabDenyWriteUnlessAdmin",
         "AwsAuditDenyWriteUnlessHomeBucketMatches",
         "AwsAuditDenyWriteUnlessCurrentMemberOrAdmin",
         "AwsAuditDenyWriteUnlessAdmin",
@@ -603,7 +652,7 @@ def user_bucket_guardrails(bucket_name: str) -> list[dict[str, Any]]:
     """Build bucket policy guardrails for a user bucket."""
     return [
         {
-            "Sid": "AwsAuditDenyWriteUnlessHomeBucketMatches",
+            "Sid": "WangLabDenyWriteUnlessHomeBucketMatches",
             "Effect": "Deny",
             "Principal": "*",
             "Action": OBJECT_WRITE_ACTIONS,
@@ -611,7 +660,7 @@ def user_bucket_guardrails(bucket_name: str) -> list[dict[str, Any]]:
             "Condition": {"StringNotEquals": {"aws:PrincipalTag/HomeBucket": bucket_name}},
         },
         {
-            "Sid": "AwsAuditDenyWriteUnlessCurrentMemberOrAdmin",
+            "Sid": "WangLabDenyWriteUnlessCurrentMemberOrAdmin",
             "Effect": "Deny",
             "Principal": "*",
             "Action": OBJECT_WRITE_ACTIONS,
@@ -629,7 +678,7 @@ def admin_only_guardrails(bucket_name: str) -> list[dict[str, Any]]:
     """Build bucket policy guardrails for admin-write-only buckets."""
     return [
         {
-            "Sid": "AwsAuditDenyWriteUnlessAdmin",
+            "Sid": "WangLabDenyWriteUnlessAdmin",
             "Effect": "Deny",
             "Principal": "*",
             "Action": OBJECT_WRITE_ACTIONS,

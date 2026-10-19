@@ -36,6 +36,14 @@ export HPC_ALLOWED_IPS="<your-ip-cidr>"
 
 These values must not be committed.
 
+## Publish Users Before Provisioning
+
+Follow [Managed HPC user lifecycle](hpc_user_lifecycle.md) to configure public-key
+sources, enable bucket versioning, review a user registry and publish it. IAM group
+membership plus fixed `HpcUid` tags determine eligibility. Nodes load the published
+versioned registry and refresh it periodically. Publishing or synchronizing requires an
+explicit `--execute`; cluster creation verifies that the published release is current.
+
 ## Generate And Validate
 
 Describe the current plan:
@@ -73,13 +81,17 @@ Create:
 uv run aws-audit hpc create-cluster
 ```
 
-Delete the test cluster and tagged test storage:
+Delete the cluster:
 
 ```bash
 uv run aws-audit hpc delete-cluster
 ```
 
-The current testing policy sets EFS and FSx deletion policies to `Delete`.
+The production default is `Retain` for EFS and FSx; retained data is not automatically
+reattached to a replacement cluster. The actual deployed policy controls deletion.
+Storage cleanup is opt-in and requires a disposable test manifest and explicit matching
+resource tags. See the lifecycle guide before migrating an existing cluster or deleting
+storage.
 
 ## Login Guardrails
 

@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "name": "lab-parallelcluster-hpc",
   "decision": {
     "scheduler": "aws-parallelcluster-slurm",
@@ -14,8 +14,6 @@
     "region": "us-east-1",
     "config_path": "config/parallelcluster_lab.yaml",
     "minimum_parallelcluster_version": "3.15.1",
-    "bootstrap_script_local_path": "scripts/parallelcluster_create_lab_users.sh",
-    "bootstrap_script_s3_uri": "s3://${PARALLELCLUSTER_ASSETS_BUCKET}/parallelcluster-assets/bootstrap/parallelcluster_create_lab_users.sh",
     "active_instance_types_local_path": "config/parallelcluster_active_instance_types.txt",
     "active_instance_types_s3_uri": "s3://${PARALLELCLUSTER_ASSETS_BUCKET}/parallelcluster-assets/bootstrap/parallelcluster_active_instance_types.txt",
     "assets_read_policy_arn": "${PARALLELCLUSTER_ASSETS_READ_POLICY_ARN}",
@@ -40,10 +38,8 @@
       "lab_members",
       "admin"
     ],
-    "exclude_users": [
-      "Diego_User"
-    ],
-    "starting_uid": 2001
+    "exclude_users": [],
+    "uid_tag": "HpcUid"
   },
   "login_guardrails": {
     "cpu_quota": "200%",
@@ -59,8 +55,8 @@
       "name": "home",
       "storage_type": "Efs",
       "mount_dir": "/home",
-      "role": "clean shared home directories for each test cluster",
-      "deletion_policy": "Delete"
+      "role": "retained shared home directories",
+      "deletion_policy": "Retain"
     },
     {
       "name": "scratch",
@@ -70,7 +66,7 @@
       "storage_capacity_gib": 1200,
       "deployment_type": "SCRATCH_2",
       "fsx_storage_type": "SSD",
-      "deletion_policy": "Delete"
+      "deletion_policy": "Retain"
     }
   ],
   "slurm": {
@@ -192,5 +188,20 @@
       "status": "alternative",
       "when_to_revisit": "Use for container-first pipelines that do not need Slurm."
     }
-  ]
+  ],
+  "user_lifecycle": {
+    "current_s3_uri": "s3://${PARALLELCLUSTER_ASSETS_BUCKET}/parallelcluster-assets/users/current.json",
+    "runtime_local_path": "src/aws_audit/hpc/user_sync.py",
+    "bootstrap_local_path": "scripts/parallelcluster_create_lab_users.sh",
+    "public_key_sources": {},
+    "adopt_existing_users": [],
+    "staleness_policy": {
+      "on_fetch_failure": "retain",
+      "warn_after_seconds": 3600
+    }
+  },
+  "storage_management": {
+    "purpose": "production",
+    "allow_cleanup": false
+  }
 }
