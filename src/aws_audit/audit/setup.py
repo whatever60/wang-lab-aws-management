@@ -582,6 +582,12 @@ def setup_eventbridge_and_sns(
     enricher_thread_table_name: str,
 ) -> list[str]:
     """Set up SNS topics and EventBridge rules for EC2/EBS/AMI audit events."""
+    if alert_destination == "none":
+        for region in regions:
+            rules = aws_json(["events", "list-rules", "--name-prefix", rule_name], region=region)["Rules"]
+            if any(rule["Name"] == rule_name for rule in rules):
+                run_aws(["events", "disable-rule", "--name", rule_name], region=region)
+        return []
     topic_arns: list[str] = []
     enricher_zip_path = ""
     enricher_role_arn = ""
@@ -1013,7 +1019,7 @@ def parse_args() -> argparse.Namespace:
         help="Which setup block to run.",
     )
 
-    parser.add_argument("--alert-destination", choices=["email", "slack"], default=os.environ.get('ALERT_DESTINATION', "email"))
+    parser.add_argument("--alert-destination", choices=["none", "email", "slack"], default=os.environ.get('ALERT_DESTINATION', "none"))
     parser.add_argument("--email-endpoint", default=os.environ.get('EMAIL_ENDPOINT', ""))
 
     parser.add_argument("--base-region", default=os.environ.get('BASE_REGION', "us-east-1"))
@@ -1034,7 +1040,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config-recorder-name", default=os.environ.get('CONFIG_RECORDER_NAME', "default"))
     parser.add_argument("--config-delivery-channel-name", default=os.environ.get('CONFIG_DELIVERY_CHANNEL_NAME', "default"))
 
-    parser.add_argument("--chatbot-region", default=os.environ.get('CHATBOT_REGION', ""))
+    parser.add_argument("--chatbot-region", default=os.environ.get('CHATBOT_REGION', "us-east-2"))
     parser.add_argument("--slack-channel-configuration-name", default=os.environ.get('SLACK_CHANNEL_CONFIGURATION_NAME', "test-configuration"))
     parser.add_argument("--slack-team-id", default=os.environ.get('SLACK_TEAM_ID', ""))
     parser.add_argument("--slack-channel-id", default=os.environ.get('SLACK_CHANNEL_ID', ""))
@@ -1057,7 +1063,7 @@ def validate_args(args: argparse.Namespace) -> None:
     """Validate argument combinations before running setup."""
     # Argparse validates explicit choices, but not environment-supplied defaults.
     for name, choices in {
-        "alert_destination": ("email", "slack"),
+        "alert_destination": ("none", "email", "slack"),
         "chatbot_logging_level": (None, "", "ERROR", "INFO", "NONE"),
         "chatbot_user_authorization_required": (None, "", "true", "false"),
     }.items():
@@ -1068,6 +1074,8 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.command in ["all", "slack"] and args.alert_destination == "slack":
         if not args.slack_team_id or not args.slack_channel_id:
             raise SystemExit("--slack-team-id and --slack-channel-id are required for Slack setup.")
+    if args.command == "slack" and args.alert_destination != "slack":
+        raise SystemExit("Slack setup requires --alert-destination slack.")
 
 
 def print_summary(account_id: str, args: argparse.Namespace, regions: list[str], trail_bucket: str, config_bucket: str) -> None:
@@ -1117,12 +1125,9 @@ def main() -> int:
             enricher_thread_table_name=args.enricher_thread_table_name,
         )
 
-    if args.command in ["all", "slack"]:
-        if args.alert_destination != "slack":
-            raise SystemExit("Slack setup requires --alert-destination slack.")
-
+    if args.command in ["all", "slack"] and args.alert_destination == "slack":
         ensure_chatbot_command_available()
-        chatbot_region = args.chatbot_region if args.chatbot_region else args.base_region
+        chatbot_region = args.chatbot_region or "us-east-2"
 
         slack_topic_arns = topic_arns
         if not slack_topic_arns:
@@ -1198,10 +1203,12 @@ def main() -> int:
     if args.alert_destination == "email" and args.command in ["all", "events"]:
         print(f"Done. Confirm SNS email subscription: {args.email_endpoint}")
     elif args.alert_destination == "slack" and args.command in ["all", "slack"]:
-        chatbot_region = args.chatbot_region if args.chatbot_region else args.base_region
+        chatbot_region = args.chatbot_region or "us-east-2"
         print(
             f"Done. SNS topics are linked to Slack configuration '{args.slack_channel_configuration_name}' in {chatbot_region}."
         )
+    elif args.alert_destination == "none" and args.command in ["all", "events"]:
+        print("Done. Routine event notifications are paused; CloudTrail and Config recording are separate.")
     else:
         print("Done.")
 

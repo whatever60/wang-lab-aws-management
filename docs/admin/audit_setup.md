@@ -10,6 +10,34 @@ The audit setup command provisions the optional account-level audit baseline:
 
 Use this only from an authenticated AWS CLI environment for the target account.
 
+## Default: Record Without Routine Notifications
+
+Use `us-east-1` as the primary workload and audit-management region while
+retaining multi-Region CloudTrail delivery to one S3 bucket. Regional Config
+recorders supply EC2/volume history for cost attribution. A home region does
+not restrict a multi-Region trail's coverage.
+[AWS multi-Region trail behavior](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-multi-region-trails.html)
+
+Routine notifications are opt-in; the default `--alert-destination none`
+disables existing matching notification rules without creating SNS topics,
+enricher functions or thread-state tables. CloudTrail and Config remain
+independent. To pause across all enabled regions:
+
+```bash
+uv run aws-audit audit-setup events --alert-destination none
+```
+
+Rules and notification resources are retained for a reversible pause. For an
+immediate Slack mute, detach the audit SNS topics from the Amazon Q channel
+configuration as well; preserve unrelated topic bindings. No test message is
+needed. AWS supports the Q chat API in selected regions; the CLI defaults to
+its `us-east-2` endpoint, independently of workload region.
+[AWS chat API regions](https://docs.aws.amazon.com/chatbot/latest/APIReference/Welcome.html)
+
+If real-time notifications become useful again, prefer one central processor
+with regional event forwarding and only actionable alerts. Until then, do not
+build a replacement processing pipeline solely to centralize an unused feature.
+
 ## Commands
 
 Show available setup commands:

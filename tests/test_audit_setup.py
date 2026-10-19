@@ -27,6 +27,7 @@ class AuditSetupTest(unittest.TestCase):
             setup.validate_args(args)
         self.assertEqual(args.base_region, "us-west-2")
         self.assertEqual(args.email_endpoint, "audit@example.test")
+        self.assertEqual(args.chatbot_region, "us-east-2")
         source = Path(args.enricher_source_path)
         self.assertEqual(source, Path(setup.__file__).with_name("ec2_audit_enricher_lambda.py"))
         archive = Path(setup.build_enricher_zip(str(source)))
@@ -52,3 +53,35 @@ class AuditSetupTest(unittest.TestCase):
                            cwd=temp, env=env, check=True)
             self.assertEqual(capture.read_text().splitlines(),
                              ["-m", "aws_audit.audit.setup", *arguments])
+
+    def test_no_notifications_only_disables_exact_existing_rules(self):
+        rule = "example-audit-rule"
+        with patch.object(setup, "aws_json", side_effect=[
+            {"Rules": [{"Name": rule}, {"Name": rule + "-other"}]},
+            {"Rules": [{"Name": rule + "-other"}]},
+        ]), patch.object(setup, "run_aws") as run, patch.object(setup, "build_enricher_zip") as package:
+            topics = setup.setup_eventbridge_and_sns(
+                "111122223333", ["us-east-1", "us-west-2"], "example-topic", rule,
+                "none", "", "example-function", "example-role", "unused.py", "example-state")
+        self.assertEqual(topics, [])
+        run.assert_called_once_with(["events", "disable-rule", "--name", rule], region="us-east-1")
+        package.assert_not_called()
+
+    def test_all_without_slack_still_sets_up_recording(self):
+        for destination in ("none", "email"):
+            arguments = ["audit-setup", "all"]
+            if destination == "email":
+                arguments += ["--alert-destination", "email", "--email-endpoint", "audit@example.test"]
+            with self.subTest(destination=destination), patch.dict(os.environ, {}, clear=True), \
+                    patch("sys.argv", arguments), patch.object(setup, "aws_text", return_value="111122223333"), \
+                    patch.object(setup, "resolve_target_regions", return_value=["us-east-1"]), \
+                    patch.object(setup, "setup_cloudtrail") as trail, \
+                    patch.object(setup, "setup_config") as config, \
+                    patch.object(setup, "setup_eventbridge_and_sns", return_value=[]) as events, \
+                    patch.object(setup, "setup_slack_channel_configuration") as slack, \
+                    patch.object(setup, "run_aws"), patch("builtins.print"):
+                self.assertEqual(setup.main(), 0)
+                trail.assert_called_once()
+                config.assert_called_once()
+                self.assertEqual(events.call_args.kwargs["alert_destination"], destination)
+                slack.assert_not_called()
