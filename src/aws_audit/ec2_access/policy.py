@@ -18,6 +18,7 @@ OWNED_ACTIONS = {
                  "ec2:TerminateInstances", "ec2:AttachVolume", "ec2:DetachVolume"),
     "volume": ("ec2:AttachVolume", "ec2:DetachVolume", "ec2:DeleteVolume", "ec2:ModifyVolume"),
     "key-pair": ("ec2:RunInstances", "ec2:DeleteKeyPair"),
+    "snapshot": ("ec2:DeleteSnapshot",),
 }
 # Exceptions intentionally cannot confer launch, key use, data attachment,
 # deletion, or volume modification. Administrators handle those shared changes.
@@ -201,7 +202,8 @@ def build_policy_bundle(config: MemberEc2Config, *, max_policy_size: int = 6144)
     def add(*args: Any, **kwargs: Any) -> None:
         statements.append(_statement(*args, **kwargs))
     def arns(kind: str) -> list:
-        return ["arn:aws:ec2:%s:%s:%s/*" % (region, config.account_id, kind) for region in sorted(config.regions)]
+        account = "" if kind in ("image", "snapshot") else config.account_id
+        return ["arn:aws:ec2:%s:%s:%s/*" % (region, account, kind) for region in sorted(config.regions)]
     owned = {"StringEquals": {"ec2:ResourceTag/Owner": SELF}}
     foreign = {"StringNotEquals": {"ec2:ResourceTag/Owner": SELF}}
     new_tags = {"StringEquals": {"aws:RequestTag/Owner": SELF, "aws:RequestTag/Project": "personal"},
@@ -269,12 +271,22 @@ def build_policy_bundle(config: MemberEc2Config, *, max_policy_size: int = 6144)
 
     shared_resources = sorted(grant.resource_arn for grant in config.shared_grants)
     for kind, actions in OWNED_ACTIONS.items():
-        add("Owned" + kind.replace("-", "").title(), "Allow", actions, arns(kind), owned)
+        # Snapshot ARNs omit the account, so require both actual account
+        # ownership and the administrator-controlled personal Owner tag.
+        owner_condition = ({"StringEquals": {"ec2:ResourceTag/Owner": SELF, "ec2:Owner": config.account_id}}
+                           if kind == "snapshot" else owned)
+        add("Owned" + kind.replace("-", "").title(), "Allow", actions, arns(kind), owner_condition)
         # NotResource covers all foreign instances except explicit shared ones;
         # shared resources receive their own principal/action/expiry Denies below.
         add("DenyForeign" + kind.replace("-", "").title(), "Deny", actions,
             shared_resources if kind == "instance" and shared_resources else arns(kind),
             foreign, not_resource=bool(kind == "instance" and shared_resources))
+    add("DenySnapshotOutsideAccount", "Deny", ["ec2:DeleteSnapshot"],
+        condition={"StringNotEquals": {"ec2:Owner": config.account_id}})
+    # Keep a missing policy variable from invalidating the personal ownership
+    # guard when another attached policy grants a broad Allow.
+    add("DenySnapshotWithoutUsername", "Deny", ["ec2:DeleteSnapshot"],
+        condition={"StringNotLike": {"aws:username": "?*"}})
     for index, grant in enumerate(sorted(config.shared_grants, key=lambda item: item.resource_arn)):
         suffix = str(index + 1)
         principals = sorted(grant.principal_arns)

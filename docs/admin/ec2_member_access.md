@@ -19,9 +19,15 @@ profile/template exception and is not the managed console onboarding flow.
 Members retain `ec2:Describe*` inventory in every region. In approved regions,
 they can start, stop, reboot, and terminate their own instances; attach/detach
 their own volumes to/from their own instances; delete/modify their own volumes;
-and use/delete their own EC2 keys. Ownership is
+delete their own snapshots held by this account; and use/delete their own EC2 keys. Ownership is
 `ec2:ResourceTag/Owner = ${aws:username}` for **IAM users**. Untagged or differently
 owned resources fail closed. Project tags never establish shared membership.
+
+Snapshot deletion also checks `ec2:Owner` against the configured account because
+snapshot ARNs have an empty account component. Administrators must verify and
+tag legacy snapshot ownership before members can delete them. Members cannot
+add, change, or remove snapshot tags, including Name; snapshot creation, copying,
+sharing, and restoration remain administrator-only.
 
 New launches use exact approved AMIs, their reviewed backing snapshots, subnets,
 and security groups. Administrators approve those inputs, including image
@@ -222,6 +228,8 @@ without adding request tags again.
 | Direct Owner/Project/other tag update, lowercase name, or any tag deletion | Explicit deny, even beside EC2FullAccess |
 | Existing foreign ENI, private AMI/snapshot, wrong SG/subnet | Explicit deny; repeat as real RunInstances DryRun |
 | Own instance and own volume attachment; either resource foreign | Allowed; explicit deny |
+| Delete own same-account snapshot; untagged/foreign owner or foreign account | Allowed; explicit deny, even beside EC2FullAccess |
+| Add/change/remove snapshot tags | Administrator-only; explicit deny |
 | Owned Start with existing disk larger than 1024 GiB | Allowed if region/type approved |
 | New/resize volume at 1024 GiB; 1025 GiB | Size guard permits boundary; explicit deny above it |
 | Exact shared principal/resource/action before expiry; wrong/expired grant | Allowed; explicit deny |

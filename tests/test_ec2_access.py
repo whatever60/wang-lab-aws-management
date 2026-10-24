@@ -136,6 +136,49 @@ def managed_member_context(**extra):
                       "ec2:LaunchTemplate": TEMPLATES[0], **extra})
 
 
+class SnapshotDeletionPolicyTest(unittest.TestCase):
+    def setUp(self):
+        launch = MemberLaunchConfig("/wanglab/member-s3/", "/wanglab/member-s3/", TEMPLATE_KEYS)
+        self.bundles = {"base": build_policy_bundle(config()),
+                        "managed": build_policy_bundle(replace(config(), member_launch=launch))}
+        self.context = owned(**{"ec2:Owner": ACCOUNT})
+
+    def check(self, expected, action, resource, context, broad=False):
+        for mode, bundle in self.bundles.items():
+            with self.subTest(mode=mode, action=action, context=context, broad=broad):
+                self.assertEqual(expected, decision(bundle, action, resource, context, broad))
+
+    def test_delete_own_snapshot_including_legacy_non_launch_source(self):
+        for snapshot in (SNAPSHOT, SNAPSHOT.replace("snap-111", "snap-222")):
+            self.check("allowed", "ec2:DeleteSnapshot", snapshot, self.context)
+
+    def test_foreign_untagged_or_other_account_snapshot_fails_closed(self):
+        for key, value in (("ec2:ResourceTag/Owner", "Bob"), ("ec2:ResourceTag/Owner", None),
+                           ("ec2:Owner", "999999999999"), ("ec2:Owner", None),
+                           ("aws:username", None), ("aws:username", "")):
+            context = dict(self.context)
+            if value is None:
+                context.pop(key)
+            else:
+                context[key] = value
+            self.check("explicitDeny", "ec2:DeleteSnapshot", SNAPSHOT, context, broad=True)
+
+    def test_other_region_or_non_snapshot_delete_fails_closed(self):
+        self.check("explicitDeny", "ec2:DeleteSnapshot", SNAPSHOT.replace(REGION, "us-east-2"),
+                   {**self.context, "ec2:Region": "us-east-2"}, broad=True)
+        self.check("implicitDeny", "ec2:DeleteSnapshot", VOLUME, self.context)
+
+    def test_snapshot_tags_and_other_snapshot_mutations_remain_admin_only(self):
+        for keys in (["Name"], ["Owner"], ["Project"], ["Name", "Owner"]):
+            context = {**self.context, "aws:TagKeys": keys,
+                       "aws:RequestTag/Owner": "Alice", "aws:RequestTag/Name": "renamed"}
+            self.check("explicitDeny", "ec2:CreateTags", SNAPSHOT, context, broad=True)
+        for action in ("ec2:DeleteTags", "ec2:CreateSnapshot", "ec2:CreateSnapshots",
+                       "ec2:CopySnapshot", "ec2:ModifySnapshotAttribute", "ec2:RegisterImage",
+                       "ec2:RestoreSnapshotTier", "ec2:RestoreSnapshotFromRecycleBin"):
+            self.check("explicitDeny", action, SNAPSHOT, self.context, broad=True)
+
+
 class MemberEc2PolicyTest(unittest.TestCase):
     def setUp(self):
         self.bundle = build_policy_bundle(config())
