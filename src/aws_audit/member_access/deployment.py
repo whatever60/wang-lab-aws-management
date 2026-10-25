@@ -6,6 +6,8 @@ from typing import Any, Dict
 
 from .models import COMPONENT, MANAGED_BY, ROLE_PATH, USER_TAG_KEYS
 from .runtime import CONFIG_ENV, HANDLER, IAM_EVENTS, validate_runtime_config
+from .native import NATIVE_EVENTS, CREATOR_TAG, OWNER_TAG
+from ..ec2_access.policy import PROTECTED_KINDS
 
 
 BOUNDARY_NAME = "WangLabMemberS3Boundary"
@@ -85,7 +87,17 @@ def runtime_permissions(account_id: str, region: str, boundary_arn: str) -> Dict
         {"Sid": "ReadHomeOwnershipOnly", "Effect": "Allow", "Action": "s3:GetBucketTagging", "Resource": "arn:aws:s3:::*",
          "Condition": {"StringEquals": {"s3:ResourceAccount": account_id}}},
         {"Sid": "ReadComputeMetadata", "Effect": "Allow", "Action": ["ec2:DescribeKeyPairs", "ec2:DescribeLaunchTemplates",
-            "ec2:DescribeLaunchTemplateVersions"], "Resource": "*"},
+            "ec2:DescribeLaunchTemplateVersions", "ec2:DescribeInstances", "ec2:DescribeVolumes",
+            "ec2:DescribeNetworkInterfaces", "ec2:DescribeSnapshots", "ec2:DescribeImages", "ec2:DescribeSecurityGroups",
+            "ec2:DescribeIamInstanceProfileAssociations", "ec2:DescribeTags"], "Resource": "*"},
+        {"Sid": "ReadCreatorHistory", "Effect": "Allow", "Action": "cloudtrail:LookupEvents", "Resource": "*"},
+        {"Sid": "AttributeNativeResources", "Effect": "Allow", "Action": "ec2:CreateTags",
+         "Resource": ["arn:aws:ec2:%s:%s:%s/*" % (region, "" if kind in ("snapshot", "image") else account_id, kind)
+                      for kind in PROTECTED_KINDS],
+         "Condition": {"ForAllValues:StringEquals": {"aws:TagKeys": [OWNER_TAG, CREATOR_TAG]}}},
+        {"Sid": "AttachDataProfileToNewNativeInstance", "Effect": "Allow", "Action": "ec2:AssociateIamInstanceProfile",
+         "Resource": "arn:aws:ec2:%s:%s:instance/*" % (region, account_id),
+         "Condition": {"Null": {"ec2:ResourceTag/" + CREATOR_TAG: "false"}}},
         {"Sid": "CreateManagedTemplates", "Effect": "Allow", "Action": "ec2:CreateLaunchTemplate", "Resource": templates,
          "Condition": {"StringEquals": creation}},
         {"Sid": "TagOnlyNewManagedTemplates", "Effect": "Allow", "Action": "ec2:CreateTags", "Resource": templates,
@@ -127,7 +139,7 @@ def cloudformation_template(config: dict, *, artifact_bucket: str, artifact_key:
             "Policies": [{"PolicyName": "MemberLifecycleMetadata", "PolicyDocument": permissions}]}},
         "Function": {"Type": "AWS::Lambda::Function", "DependsOn": ["Boundary", "Logs"], "Properties": {
             "FunctionName": FUNCTION_NAME, "Runtime": "python3.12", "Handler": HANDLER, "Role": {"Fn::GetAtt": ["RuntimeRole", "Arn"]},
-            "Code": {"S3Bucket": artifact_bucket, "S3Key": artifact_key}, "Timeout": 900, "MemorySize": 256, "ReservedConcurrentExecutions": 1,
+            "Code": {"S3Bucket": artifact_bucket, "S3Key": artifact_key}, "Timeout": 900, "MemorySize": 512, "ReservedConcurrentExecutions": 1,
             "Environment": {"Variables": {CONFIG_ENV: serialized}}, "Tags": tags}},
         "Errors": {"Type": "AWS::CloudWatch::Alarm", "Properties": {"AlarmName": "wanglab-member-access-errors", "Namespace": "AWS/Lambda", "MetricName": "Errors",
             "Dimensions": [{"Name": "FunctionName", "Value": {"Ref": "Function"}}], "Statistic": "Sum", "Period": 60, "EvaluationPeriods": 1,
@@ -135,12 +147,14 @@ def cloudformation_template(config: dict, *, artifact_bucket: str, artifact_key:
     }
     resources["IdentityChanges"] = {"Type": "AWS::Events::Rule", "Properties": {
         "Name": "wanglab-member-access-identity", "State": "ENABLED", "ScheduleExpression": "rate(5 minutes)",
-        "EventPattern": {"source": ["aws.iam"], "detail-type": ["AWS API Call via CloudTrail"],
-                         "detail": {"eventSource": ["iam.amazonaws.com"], "eventName": list(IAM_EVENTS)}},
+        "EventPattern": {"source": ["aws.iam", "aws.ec2"], "detail-type": ["AWS API Call via CloudTrail"],
+                         "detail": {"eventSource": ["iam.amazonaws.com", "ec2.amazonaws.com"],
+                                    "eventName": list(IAM_EVENTS) + list(NATIVE_EVENTS),
+                                    "errorCode": [{"exists": False}]}},
         "Targets": [{"Id": "MemberAccess", "Arn": {"Fn::GetAtt": ["Function", "Arn"]}}]}}
     resources["IdentityChangesPermission"] = {"Type": "AWS::Lambda::Permission", "Properties": {
         "Action": "lambda:InvokeFunction", "FunctionName": {"Ref": "Function"}, "Principal": "events.amazonaws.com",
         "SourceArn": {"Fn::GetAtt": ["IdentityChanges", "Arn"]}, "SourceAccount": account}}
-    return {"AWSTemplateFormatVersion": "2010-09-09", "Description": "Managed personal EC2 launch templates and S3-only roles with membership-driven revocation",
+    return {"AWSTemplateFormatVersion": "2010-09-09", "Description": "Native EC2 creator attribution and personal S3 roles with membership-driven revocation",
             "Resources": resources, "Outputs": {"FunctionName": {"Value": {"Ref": "Function"}},
                 "BoundaryArn": {"Value": {"Ref": "Boundary"}}}}

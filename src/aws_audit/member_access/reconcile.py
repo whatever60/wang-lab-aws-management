@@ -430,7 +430,7 @@ def plan(config: MemberLaunchConfig, observed: dict) -> dict:
             expected_tags = {template["user_tag_key"]: template_arn(config, template["region"], observed["templates"][template["region"]][template["name"]]["id"])
                              for template in item["templates"] if template["name"] in observed["templates"][template["region"]]}
             state_ok = role is not None and _same(role.get("state"), role_state(True, item["home_bucket"])) and _same(role.get("trust"), trust_policy(True))
-            tags_ok = (len(expected_tags) == len(USER_TAG_KEYS)
+            tags_ok = (len(expected_tags) == (len(USER_TAG_KEYS) if config.flavors else 0)
                        and all(observed["users"][name]["tags"].get(key) == value for key, value in expected_tags.items()))
             access_tag_ok = role is not None and role["tags"].get("AccessRole") == "CurrentMember"
             if not state_ok or not tags_ok or not access_tag_ok or not role_ok or not profile_ok or not templates_ok:

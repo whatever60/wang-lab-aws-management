@@ -29,7 +29,11 @@ class DeploymentTest(unittest.TestCase):
         allows = [s for s in document["Statement"] if s["Effect"] == "Allow"]
         actions = {a for s in allows for a in ([s["Action"]] if isinstance(s["Action"], str) else s["Action"])}
         self.assertNotIn("ec2:RunInstances", actions)
-        self.assertNotIn("ec2:AssociateIamInstanceProfile", actions)
+        attachment = next(s for s in allows if s["Sid"] == "AttachDataProfileToNewNativeInstance")
+        self.assertTrue(attachment["Resource"].endswith(":instance/*"))
+        self.assertEqual(attachment["Condition"]["Null"]["ec2:ResourceTag/wanglab:CreatorUserId"], "false")
+        self.assertNotIn("ec2:ReplaceIamInstanceProfileAssociation", actions)
+        self.assertNotIn("ec2:DisassociateIamInstanceProfile", actions)
         self.assertNotIn("s3:GetObject", actions)
         self.assertNotIn("iam:CreateAccessKey", actions)
         create = next(s for s in allows if s["Sid"] == "CreateBoundedRoles")

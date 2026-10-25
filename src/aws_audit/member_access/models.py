@@ -102,7 +102,7 @@ def validate_config(config: MemberLaunchConfig) -> None:
         raise ValueError("S3 user names must be exact IAM usernames")
     # A missing/invalid member home is a per-member blocked state, not a reason
     # to prevent other users from being revoked during the same run.
-    if len(config.flavors) != len(FLAVOR_TAG_KEYS) or {f.name for f in config.flavors} != set(FLAVOR_TAG_KEYS):
+    if config.flavors and (len(config.flavors) != len(FLAVOR_TAG_KEYS) or {f.name for f in config.flavors} != set(FLAVOR_TAG_KEYS)):
         raise ValueError("flavors must contain exactly Ubuntu2404, Al2023, DL2204, DL2404")
     for flavor in config.flavors:
         build_launch_request(config.ec2_config, username="Validation_User", key_name="validation_key",

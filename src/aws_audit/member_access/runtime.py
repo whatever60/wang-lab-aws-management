@@ -21,6 +21,7 @@ CONFIG_ENV = "WANGLAB_MEMBER_ACCESS_CONFIG"
 CONTROL_REGION = "us-east-1"
 HANDLER = "aws_audit.member_access.runtime.lambda_handler"
 IAM_EVENTS = ("AddUserToGroup", "RemoveUserFromGroup", "TagUser", "UntagUser", "DeleteUser")
+_AWS_CLIENTS = {}
 PACKAGE_FILES = (
     "aws_audit/__init__.py",
     "aws_audit/ec2_access/__init__.py",
@@ -30,6 +31,7 @@ PACKAGE_FILES = (
     "aws_audit/member_access/models.py",
     "aws_audit/member_access/policies.py",
     "aws_audit/member_access/reconcile.py",
+    "aws_audit/member_access/native.py",
     "aws_audit/member_access/runtime.py",
 )
 
@@ -75,10 +77,10 @@ def validate_runtime_config(value: Any, *, account_id: str, region: str) -> Dict
     _account(account_id)
     if region != CONTROL_REGION:
         raise RuntimeValidationError("IAM reconciliation must run in us-east-1")
-    if not isinstance(value, dict) or set(value) - {"ec2_config", "flavors", "member_group", "permissions_boundary_arn"}:
+    if not isinstance(value, dict) or set(value) - {"ec2_config", "flavors", "member_group", "permissions_boundary_arn", "native_since"}:
         raise RuntimeValidationError("runtime configuration accepts infrastructure only")
-    if not {"ec2_config", "flavors"} <= set(value):
-        raise RuntimeValidationError("runtime configuration requires EC2 sources and flavors")
+    if "ec2_config" not in value:
+        raise RuntimeValidationError("runtime configuration requires an EC2 account and regions")
     if value.get("member_group", "lab_members") != "lab_members":
         raise RuntimeValidationError("unexpected authoritative member group")
     try:
@@ -90,10 +92,10 @@ def validate_runtime_config(value: Any, *, account_id: str, region: str) -> Dict
     boundary = value.get("permissions_boundary_arn")
     if not isinstance(boundary, str) or not re.fullmatch(r"arn:aws:iam::" + account_id + r":policy/[A-Za-z0-9_+=,.@/\-]+", boundary):
         raise RuntimeValidationError("runtime requires an exact same-account role permissions boundary")
-    flavors = value["flavors"]
+    flavors = value.get("flavors", [])
     expected = {"Ubuntu2404", "Al2023", "DL2204", "DL2404"}
-    if not isinstance(flavors, list) or len(flavors) != len(expected):
-        raise RuntimeValidationError("exactly four approved launch flavors are required")
+    if not isinstance(flavors, list) or len(flavors) not in (0, len(expected)):
+        raise RuntimeValidationError("flavors must be empty for native launches or contain the four optional templates")
     names = set()
     for flavor in flavors:
         fields = {"name", "region", "image_id", "instance_type", "subnet_id", "security_group_id"}
@@ -108,10 +110,20 @@ def validate_runtime_config(value: Any, *, account_id: str, region: str) -> Dict
                                  security_group_id=flavor["security_group_id"])
         except (TypeError, ValueError):
             raise RuntimeValidationError("launch flavor is outside approved EC2 sources") from None
-    if names != expected:
+    if flavors and names != expected:
         raise RuntimeValidationError("launch flavor names must be unique and exact")
-    return {"ec2_config": value["ec2_config"], "flavors": flavors, "member_group": "lab_members",
-            "permissions_boundary_arn": boundary}
+    result = {"ec2_config": value["ec2_config"], "flavors": flavors, "member_group": "lab_members",
+              "permissions_boundary_arn": boundary}
+    if "native_since" in value:
+        from datetime import datetime
+        try:
+            since = datetime.fromisoformat(value["native_since"].replace("Z", "+00:00"))
+            if since.tzinfo is None:
+                raise ValueError("timezone required")
+        except (ValueError, TypeError, AttributeError):
+            raise RuntimeValidationError("native_since must be an exact timestamp with timezone") from None
+        result["native_since"] = value["native_since"]
+    return result
 
 
 def load_runtime_config(*, account_id: str, region: str) -> Dict[str, Any]:
@@ -221,7 +233,7 @@ def live_member_manifest(iam: Any, s3: Any, *, account_id: str, member_group: st
 def _backend(iam: Any, ec2_by_region: dict, config: dict, s3: Any) -> Any:
     from .models import config_from_mapping
     from .reconcile import reconcile
-    return reconcile(iam, ec2_by_region, config_from_mapping(config), s3=s3, execute=True)
+    return reconcile(iam, ec2_by_region, config_from_mapping({k: v for k, v in config.items() if k != "native_since"}), s3=s3, execute=True)
 
 
 def run_reconciliation(iam: Any, s3: Any, ec2_by_region: dict, config: dict, *,
@@ -299,6 +311,11 @@ def _trigger(event: Any, account_id: str) -> str:
     if event.get("source") == "aws.events" and event.get("detail-type") == "Scheduled Event":
         return "schedule"
     detail = event.get("detail", {})
+    from .native import NATIVE_EVENTS
+    if (event.get("source") == "aws.ec2" and event.get("detail-type") == "AWS API Call via CloudTrail"
+            and isinstance(detail, dict) and detail.get("eventSource") == "ec2.amazonaws.com"
+            and detail.get("eventName") in NATIVE_EVENTS):
+        return "ignored" if detail.get("errorCode") else "ec2"
     if (event.get("source") == "aws.iam" and event.get("detail-type") == "AWS API Call via CloudTrail"
             and isinstance(detail, dict) and detail.get("eventSource") == "iam.amazonaws.com"
             and detail.get("eventName") in IAM_EVENTS):
@@ -339,19 +356,34 @@ def _self_pointer_event(detail: dict, account_id: str) -> bool:
     return len(keys) == len(USER_TAG_KEYS) and set(keys) == set(USER_TAG_KEYS)
 
 
+def _aws_client(service: str, region: str) -> Any:
+    """Reuse SDK models/connection pools across warm Lambda invocations."""
+    session_key = ("session", region)
+    if session_key not in _AWS_CLIENTS:
+        import boto3
+        _AWS_CLIENTS[session_key] = boto3.Session(region_name=region)
+    key = (service, region)
+    if key not in _AWS_CLIENTS:
+        _AWS_CLIENTS[key] = _AWS_CLIENTS[session_key].client(service, region_name=region)
+    return _AWS_CLIENTS[key]
+
+
 def lambda_handler(event: Any, context: Any) -> dict:
     """AWS entry point; credentials come exclusively from the execution role."""
     account_id, region = _invocation(context)
     trigger = _trigger(event, account_id)
     if trigger == "ignored":
         return {"status": "ignored"}
-    import boto3
     try:
-        session = boto3.Session(region_name=region)
         config = load_runtime_config(account_id=account_id, region=region)
-        result = run_reconciliation(session.client("iam"), session.client("s3"),
-                                    {r: session.client("ec2", region_name=r) for r in config["ec2_config"]["regions"]},
-                                    config, account_id=account_id, region=region)
+        iam, s3 = _aws_client("iam", region), _aws_client("s3", region)
+        ec2_clients = {r: _aws_client("ec2", r) for r in config["ec2_config"]["regions"]}
+        result = run_reconciliation(iam, s3, ec2_clients, config, account_id=account_id, region=region)
+        if config.get("native_since"):
+            from .native import reconcile_native
+            result["native"] = reconcile_native(iam, s3, ec2_clients[region], _aws_client("cloudtrail", region), config,
+                                                account_id=account_id, region=region,
+                                                event_name=event["detail"]["eventName"] if trigger == "ec2" else None)
     except Exception as exc:
         raise ReconciliationError("member access reconciliation failed; retry required", _diagnostic(exc)) from None
     return {**result, "trigger": trigger}

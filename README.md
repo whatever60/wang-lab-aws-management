@@ -3,6 +3,11 @@
 Lab AWS access, personal EC2 launches, inventory and cost reports, audit alerts,
 and optional ParallelCluster/Slurm test tooling.
 
+Members use the ordinary AWS console, CLI and SDK. EC2 is allowed by default;
+explicit guardrails protect other people's resources and shared account
+settings. Ownership and personal S3 access are handled in the background, with
+no required template, special tags or repository command.
+
 The repo now exposes one command:
 
 ```bash
@@ -47,9 +52,9 @@ Examples:
   ParallelCluster values.
 - `config/s3_access_manifest.example.json` is a safe example. Copy it to ignored
   `config/s3_access_manifest.local.json` before running S3 reconciliation.
-- `config/member_access.local.json` holds approved launch infrastructure. The
-  deployed function receives this nonsecret JSON directly; live IAM membership
-  and bucket ownership tags remain authoritative.
+- `config/member_access.local.json` holds account/region, S3 boundary and native
+  cutover configuration. The deployed function receives this nonsecret JSON
+  directly; live IAM membership and bucket ownership tags remain authoritative.
 - Generated operational files such as `config/parallelcluster_lab.yaml`,
   `config/parallelcluster_active_instance_types.txt`, catalog snapshots, outputs,
   and `site/` are ignored.

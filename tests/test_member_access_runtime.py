@@ -264,7 +264,7 @@ class MemberAccessRuntimeTest(unittest.TestCase):
                             "requestParameters": {"userName": "Alice", "groupName": "lab_members"},
                             "unrelated": "do not log this event payload"}}
         seen = []
-        with mock.patch.dict(sys.modules, {"boto3": sdk}), \
+        with mock.patch.dict(runtime._AWS_CLIENTS, {}, clear=True), mock.patch.dict(sys.modules, {"boto3": sdk}), \
                 mock.patch.dict("os.environ", {runtime.CONFIG_ENV: json.dumps(configuration())}), \
                 mock.patch.object(runtime, "_backend", side_effect=lambda *args: seen.append(args[2])), \
                 mock.patch("builtins.print") as printed:
@@ -277,6 +277,17 @@ class MemberAccessRuntimeTest(unittest.TestCase):
         with self.assertRaises(runtime.RuntimeValidationError):
             runtime.lambda_handler({**event, "account": "999999999999"}, context)
         self.assertEqual(runtime.lambda_handler({"source": "other"}, context), {"status": "ignored"})
+
+    def test_warm_invocations_reuse_sdk_models_and_client_pools(self):
+        client = object()
+        session = mock.Mock()
+        session.client.return_value = client
+        sdk = types.SimpleNamespace(Session=mock.Mock(return_value=session))
+        with mock.patch.dict(runtime._AWS_CLIENTS, {}, clear=True), mock.patch.dict(sys.modules, {"boto3": sdk}):
+            self.assertIs(runtime._aws_client("cloudtrail", REGION), client)
+            self.assertIs(runtime._aws_client("cloudtrail", REGION), client)
+        sdk.Session.assert_called_once()
+        session.client.assert_called_once()
 
     def test_schedule_and_manual_triggers_do_not_depend_on_cloudtrail_delivery(self):
         self.assertEqual(runtime._trigger({}, ACCOUNT), "manual")

@@ -46,32 +46,22 @@ The HPC tooling rejects duplicate UIDs and normalized Linux names.
    approved-read and alumni-read policies while preserving all other statements.
 8. Run `aws-audit member-access sync`, or use
    `aws-audit s3-access apply --sync-member-access` after reviewing the full
-   manifest. Membership events also trigger synchronization, with a five-minute
-   scheduled fallback. Verify four personal template pointers, the bounded
-   S3-only role and profile, and launch authorization. Where member CLI
-   credentials are being delivered, use that member's actual identity for
-   `RunInstances` with `DryRun=true` on each personal template, plus an intended
-   instance-type override. Expect `DryRunOperation`; administrator credentials
-   or IAM simulation alone do not verify the member's launch path. Review the
-   [automation runbook](member_launch_automation.md) for prerequisites and
-   failure handling.
-9. Verify the new CLI identity, own-bucket read/write, approved-bucket reads,
-   other-bucket write denial, console reset requirement, and public-key presence.
-10. When HPC is deployed, publish and synchronize its managed roster using the
-   [HPC lifecycle workflow](parallelcluster_hpc.md). EC2 key-pair existence alone
-   does not install a key on a Linux account. Review node targets and deployment
-   prerequisites before executing synchronization.
+   manifest. Verify the bounded personal S3 role/profile; no template pointers
+   or personally tagged SSH key are prerequisites for native EC2 creation.
+9. Verify CLI identity, own-bucket read/write, approved reads, foreign write
+   denial, console reset and SSH key presence. Use the member identity for a
+   normal RunInstances DryRun with no template, special tags or profile.
+10. When HPC is deployed, synchronize its managed roster using the
+    [HPC lifecycle workflow](parallelcluster_hpc.md). EC2 keys alone do not
+    install Linux SSH authorization.
 11. Deliver credentials and the private key only to the confirmed recipient via
-    the explicitly authorized channel. Include the deployment region, their
-    exact personal template names, **EC2 → Launch Templates → Actions → Launch
-    instance from template**, and the [launch guide](../user/ec2_launch.md).
-    Explain that the template is required and that approved instance types can
-    be changed before launch. Record delivery metadata without secrets.
+    the explicitly authorized channel. Members use normal EC2 **Launch
+    instance** and standard CLI/SDK calls in `us-east-1`. Record delivery
+    metadata without secrets.
 
-Members use the [EC2 console launch workflow](../user/ec2_launch.md); personal
-templates supply ownership tags, a default owned key, network settings and the
-member's S3-only instance profile. This applies to new launches. Existing
-instances and their profiles require a separately reviewed migration.
+[Native EC2 usage](../user/ec2_launch.md) needs no special launch procedure.
+Ownership and personal S3 profile attachment run in the background for new
+instances; existing machines and profiles are not retrofitted.
 
 ## Offboard To Alumni
 
@@ -80,7 +70,8 @@ instances and their profiles require a separately reviewed migration.
 2. Retag the home bucket's `OwnerAccessRole=Alumni` and update the full local S3
    manifest. Preserve approved reads and deny writes, including to the old home.
 3. Run `aws-audit member-access sync` and verify the managed role has an explicit
-   deny-all state and the four IAM template pointers are removed. Automatic IAM
+   deny-all state and legacy IAM template pointers are removed where present.
+   Automatic IAM
    event handling and the scheduled fallback also reconcile this state. Both
    existing role credentials and new EC2 role sessions lose authorization after
    IAM propagation; this is not an instantaneous revocation guarantee. Templates

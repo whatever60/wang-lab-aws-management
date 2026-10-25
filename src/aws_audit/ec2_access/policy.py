@@ -13,20 +13,25 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 
 SELF = "${aws:username}"
-OWNED_ACTIONS = {
-    "instance": ("ec2:StartInstances", "ec2:StopInstances", "ec2:RebootInstances",
-                 "ec2:TerminateInstances", "ec2:AttachVolume", "ec2:DetachVolume"),
-    "volume": ("ec2:AttachVolume", "ec2:DetachVolume", "ec2:DeleteVolume", "ec2:ModifyVolume"),
-    "key-pair": ("ec2:RunInstances", "ec2:DeleteKeyPair"),
-    "snapshot": ("ec2:DeleteSnapshot",),
+READ_ACTIONS = ("ec2:Describe*",)
+# These are exceptions to protection of someone else's resource, not an
+# allowlist for a member's own work. Native EC2 APIs are allowed by default.
+SOURCE_USE = {
+    "key-pair": ("RunInstances",),
+    "image": ("RunInstances", "CopyImage", "CreateReplaceRootVolumeTask"),
+    "snapshot": ("RunInstances", "CreateVolume", "CopySnapshot"),
+    "security-group": ("RunInstances", "CreateNetworkInterface", "CreateVpcEndpoint"),
+    "subnet": ("RunInstances", "CreateNetworkInterface", "CreateNatGateway", "CreateVpcEndpoint"),
+    "vpc": ("RunInstances", "CreateSecurityGroup", "CreateSubnet", "CreateRouteTable",
+            "CreateNetworkAcl", "CreateVpcEndpoint", "CreateVpcPeeringConnection"),
+    "launch-template": ("RunInstances", "CreateFleet"),
 }
+PROTECTED_KINDS = ("instance", "volume", "network-interface", "elastic-ip",
+                   "route-table", "internet-gateway", "egress-only-internet-gateway", "natgateway",
+                   "network-acl", "vpc-endpoint", "vpc-peering-connection", *SOURCE_USE)
 # Exceptions intentionally cannot confer launch, key use, data attachment,
 # deletion, or volume modification. Administrators handle those shared changes.
 SHARED_ACTIONS = {"ec2:StartInstances", "ec2:StopInstances", "ec2:RebootInstances"}
-CREATE_ACTIONS = ("RunInstances", "CreateVolume", "ImportKeyPair")
-MUTATIONS = tuple(sorted({action for actions in OWNED_ACTIONS.values() for action in actions}
-                         | {"ec2:RunInstances", "ec2:CreateVolume", "ec2:ImportKeyPair", "ec2:CreateTags"}))
-ALLOWED_ACTIONS = ("ec2:Describe*",) + MUTATIONS
 VERSION = "2012-10-17"
 
 
@@ -55,11 +60,11 @@ class MemberLaunchConfig:
 class MemberEc2Config:
     account_id: str
     regions: Tuple[str, ...]
-    instance_types: Tuple[str, ...]
-    approved_image_arns: Tuple[str, ...]
-    approved_snapshot_arns: Tuple[str, ...]
-    approved_subnet_arns: Tuple[str, ...]
-    approved_security_group_arns: Tuple[str, ...]
+    instance_types: Tuple[str, ...] = field(default_factory=tuple)
+    approved_image_arns: Tuple[str, ...] = field(default_factory=tuple)
+    approved_snapshot_arns: Tuple[str, ...] = field(default_factory=tuple)
+    approved_subnet_arns: Tuple[str, ...] = field(default_factory=tuple)
+    approved_security_group_arns: Tuple[str, ...] = field(default_factory=tuple)
     shared_grants: Tuple[SharedGrant, ...] = field(default_factory=tuple)
     member_launch: Optional[MemberLaunchConfig] = None
 
@@ -71,14 +76,16 @@ def policy_size(document: Mapping[str, Any]) -> int:
 
 def config_from_mapping(value: Mapping[str, Any]) -> MemberEc2Config:
     """Read an explicit JSON configuration; reject omissions and unknown fields."""
-    optional = {"shared_grants", "member_launch"}
+    optional = {"shared_grants", "member_launch", "instance_types", "approved_image_arns", "approved_snapshot_arns",
+                "approved_subnet_arns", "approved_security_group_arns"}
     fields = {"account_id", "regions", "instance_types", "approved_image_arns", "approved_snapshot_arns",
               "approved_subnet_arns", "approved_security_group_arns"} | optional
     if not isinstance(value, dict) or set(value) - fields or fields - optional - set(value):
         raise ValueError("configuration contains unknown fields or missing required fields")
     kwargs = {"account_id": value["account_id"]}
-    for key in fields - optional - {"account_id"}:
-        items = value[key]
+    for key in ("regions", "instance_types", "approved_image_arns", "approved_snapshot_arns",
+                "approved_subnet_arns", "approved_security_group_arns"):
+        items = value.get(key, [])
         if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
             raise ValueError(key + " must be an array of strings")
         kwargs[key] = tuple(items)
@@ -117,8 +124,8 @@ def _validate(config: MemberEc2Config) -> None:
     if not isinstance(config.account_id, str) or not re.fullmatch(r"[0-9]{12}", config.account_id):
         raise ValueError("account_id must be an exact twelve-digit AWS account")
     for label, values in (("regions", config.regions), ("instance_types", config.instance_types)):
-        if not values or len(set(values)) != len(values):
-            raise ValueError(label + " must be nonempty and unique")
+        if (label == "regions" and not values) or len(set(values)) != len(values):
+            raise ValueError(label + " must be unique; regions must be nonempty")
     if any(not re.fullmatch(r"[a-z]{2}(?:-[a-z]+)+-\d", region) for region in config.regions):
         raise ValueError("regions must be exact region names")
     if any(not re.fullmatch(r"[a-z0-9-]+\.[a-z0-9]+", item) for item in config.instance_types):
@@ -127,8 +134,8 @@ def _validate(config: MemberEc2Config) -> None:
                          ("snapshot", config.approved_snapshot_arns),
                          ("subnet", config.approved_subnet_arns),
                          ("security-group", config.approved_security_group_arns)):
-        if not values or len(set(values)) != len(values):
-            raise ValueError("approved " + kind + " ARNs must be nonempty and unique")
+        if len(set(values)) != len(values):
+            raise ValueError("approved " + kind + " ARNs must be unique")
         for arn in values:
             _validate_arn(config, arn, kind)
     seen = set()
@@ -188,12 +195,11 @@ def _statement(sid: str, effect: str, actions: Sequence[str], resources: Any = "
 
 
 def build_policy_bundle(config: MemberEc2Config, *, max_policy_size: int = 6144) -> Dict[str, Dict[str, Any]]:
-    """Return deployable managed-policy documents; attach EVERY returned policy.
+    """Native EC2 console/API access; ownership and S3 profiles are reconciled later.
 
-    No default account, infrastructure, AMI, principal, or expiry is inferred.
-    Shared grants cover only explicitly listed existing-instance lifecycle APIs.
-    With the existing three S3/EBS managed policies, at most six generated
-    policies fit the default group attachment quota after EC2FullAccess removal.
+    Launching requires no template, request tags, profile, approved AMI/type,
+    or special key workflow. Explicit guardrails protect known foreign resources
+    after attribution. An untagged resource is not a tenant-isolation boundary.
     """
     _validate(config)
     if not isinstance(max_policy_size, int) or not 1024 <= max_policy_size <= 6144:
@@ -204,201 +210,70 @@ def build_policy_bundle(config: MemberEc2Config, *, max_policy_size: int = 6144)
     def arns(kind: str) -> list:
         account = "" if kind in ("image", "snapshot") else config.account_id
         return ["arn:aws:ec2:%s:%s:%s/*" % (region, account, kind) for region in sorted(config.regions)]
-    owned = {"StringEquals": {"ec2:ResourceTag/Owner": SELF}}
-    foreign = {"StringNotEquals": {"ec2:ResourceTag/Owner": SELF}}
-    new_tags = {"StringEquals": {"aws:RequestTag/Owner": SELF, "aws:RequestTag/Project": "personal"},
-                "ForAllValues:StringEquals": {"aws:TagKeys": ["Owner", "Project", "Name"]}}
-    launch = config.member_launch
-    template_arns = ["${aws:PrincipalTag/" + key + "}" for key in launch.template_tag_keys] if launch else []
-    template_resources = arns("launch-template") if launch else []
-
-    add("Inventory", "Allow", ["ec2:Describe*"])
-    # ec2:Region is EC2-only. The Null test prevents NotAction from denying
-    # unrelated services, e.g. the member's existing S3 and password permissions.
-    # PassRole is an explicitly guarded EC2 dependency in managed-launch mode;
-    # exclude it even if the EC2 authorization context carries ec2:Region into
-    # its dependent authorization. No other new mutation leaves the EC2 gate.
-    gated_actions = ALLOWED_ACTIONS + (("iam:PassRole",) if launch else ())
-    add("DenyOtherEc2Actions", "Deny", gated_actions,
-        condition={"Null": {"ec2:Region": "false"}}, not_action=True)
-    add("DenyMutationOutsideApprovedRegions", "Deny", MUTATIONS,
-        condition={"StringNotEquals": {"ec2:Region": sorted(config.regions)}})
-    alternate_paths = [
-        "elasticloadbalancing:*", "autoscaling:*", "ebs:*", "iam:CreateServiceLinkedRole",
-        "iam:TagUser", "iam:UntagUser", "sts:AssumeRole", "sts:TagSession",
-        "ssm:*", "ec2-instance-connect:*",
-        "cloudwatch:PutMetricAlarm", "cloudwatch:PutCompositeAlarm", "cloudwatch:EnableAlarmActions",
-        "cloudwatch:SetAlarmState", "cloudwatch:PutMetricData",
-    ]
-    if launch is None:
-        alternate_paths.append("iam:PassRole")
-    add("DenyAlternateInfrastructureAndAccessPaths", "Deny", alternate_paths)
-    if launch is not None:
-        role_arn = "arn:aws:iam::" + config.account_id + ":role" + launch.role_path + SELF
-        profile_arn = "arn:aws:iam::" + config.account_id + ":instance-profile" + launch.instance_profile_path + SELF
-        add("PassOwnPersonalS3RoleToEc2", "Allow", ["iam:PassRole"], role_arn,
-            {"StringEquals": {"iam:PassedToService": "ec2.amazonaws.com"}})
-        add("DenyForeignPassRole", "Deny", ["iam:PassRole"], role_arn, not_resource=True)
-        add("DenyPassRoleToOtherServices", "Deny", ["iam:PassRole"],
-            condition={"StringNotEquals": {"iam:PassedToService": "ec2.amazonaws.com"}})
-        add("ListInstanceProfilesForConsole", "Allow", ["iam:ListInstanceProfiles"])
-        add("ReadOwnInstanceProfileForConsole", "Allow", ["iam:GetInstanceProfile"], profile_arn)
-        add("ReadOwnRoleForConsole", "Allow", ["iam:GetRole", "iam:ListInstanceProfilesForRole"], role_arn)
-        add("DenyMemberIdentityAdministration", "Deny", [
-            "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile", "iam:AddRoleToInstanceProfile",
-            "iam:RemoveRoleFromInstanceProfile", "iam:TagInstanceProfile", "iam:UntagInstanceProfile",
-            "iam:CreateRole", "iam:DeleteRole", "iam:UpdateRole", "iam:UpdateRoleDescription",
-            "iam:UpdateAssumeRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy",
-            "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePermissionsBoundary",
-            "iam:DeleteRolePermissionsBoundary", "iam:TagRole", "iam:UntagRole",
-        ])
-        # Denies without policy variables keep unresolved template-tag variables
-        # from invalidating a template string-comparison guard and opening a bypass.
-        # Admin onboarding must finish every configured flavor before enabling
-        # launches; offboarding can revoke launch/PassRole by clearing any tag.
-        member_actions = ["ec2:RunInstances", "iam:PassRole"]
-        add("DenyMemberLaunchWithoutIamUsername", "Deny", member_actions,
-            condition={"StringNotLike": {"aws:username": "?*"}})
-        add("DenyLaunchUnlessCurrentMember", "Deny", member_actions,
-            condition={"StringNotEquals": {"aws:PrincipalTag/AccessRole": "CurrentMember"}})
-        add("DenyLaunchWithoutHomeBucket", "Deny", member_actions,
-            condition={"StringNotLike": {"aws:PrincipalTag/HomeBucket": "?*"}})
-        for index, key in enumerate(launch.template_tag_keys):
-            expected_templates = ["arn:aws:ec2:%s:%s:launch-template/lt-*" % (region, config.account_id)
-                                  for region in sorted(config.regions)]
-            add("DenyInvalidMemberTemplateTag" + str(index + 1), "Deny", member_actions,
-                condition={"StringNotLike": {"aws:PrincipalTag/" + key: expected_templates}})
-
-    shared_resources = sorted(grant.resource_arn for grant in config.shared_grants)
-    for kind, actions in OWNED_ACTIONS.items():
-        # Snapshot ARNs omit the account, so require both actual account
-        # ownership and the administrator-controlled personal Owner tag.
-        owner_condition = ({"StringEquals": {"ec2:ResourceTag/Owner": SELF, "ec2:Owner": config.account_id}}
-                           if kind == "snapshot" else owned)
-        add("Owned" + kind.replace("-", "").title(), "Allow", actions, arns(kind), owner_condition)
-        # NotResource covers all foreign instances except explicit shared ones;
-        # shared resources receive their own principal/action/expiry Denies below.
-        add("DenyForeign" + kind.replace("-", "").title(), "Deny", actions,
-            shared_resources if kind == "instance" and shared_resources else arns(kind),
-            foreign, not_resource=bool(kind == "instance" and shared_resources))
-    add("DenySnapshotOutsideAccount", "Deny", ["ec2:DeleteSnapshot"],
-        condition={"StringNotEquals": {"ec2:Owner": config.account_id}})
-    # Keep a missing policy variable from invalidating the personal ownership
-    # guard when another attached policy grants a broad Allow.
-    add("DenySnapshotWithoutUsername", "Deny", ["ec2:DeleteSnapshot"],
+    foreign = {"Null": {"ec2:ResourceTag/wanglab:Owner": "false"},
+               "StringNotEquals": {"ec2:ResourceTag/wanglab:Owner": SELF}}
+    add("NativeEc2", "Allow", ["ec2:*", "pricing:GetProducts"])
+    add("MutationRegions", "Deny", READ_ACTIONS,
+        condition={"Null": {"ec2:Region": "false"},
+                   "StringNotEquals": {"ec2:Region": sorted(config.regions)}}, not_action=True)
+    add("IdentityRequired", "Deny", ["ec2:*", "iam:PassRole"],
         condition={"StringNotLike": {"aws:username": "?*"}})
+    shared = sorted(grant.resource_arn for grant in config.shared_grants)
+    # Untagged newly created resources remain usable during asynchronous
+    # creator attribution. Existing canonical owners cannot be claimed.
+    add("ForeignResources", "Deny", READ_ACTIONS,
+        [arn for kind in SOURCE_USE for arn in arns(kind)] + shared,
+        foreign, not_action=True, not_resource=True)
+    for kind in SOURCE_USE:
+        harmless = READ_ACTIONS + tuple("ec2:" + a for a in SOURCE_USE.get(kind, ()))
+        add("Foreign" + kind.replace("-", "").title(), "Deny", harmless,
+            arns(kind), foreign, not_action=True)
     for index, grant in enumerate(sorted(config.shared_grants, key=lambda item: item.resource_arn)):
         suffix = str(index + 1)
         principals = sorted(grant.principal_arns)
-        condition = {"ArnEquals": {"aws:PrincipalArn": principals},
-                     "DateLessThan": {"aws:CurrentTime": grant.expires_at}}
-        add("SharedLifecycle" + suffix, "Allow", sorted(grant.actions), grant.resource_arn, condition)
-        # These restrictions apply even if an unrelated policy has a broad Allow.
-        # Owners keep their ordinary owned-resource permissions; exceptions do
-        # not remove legitimate ownership.
-        add("DenyUnapprovedSharedPrincipal" + suffix, "Deny", OWNED_ACTIONS["instance"], grant.resource_arn,
-            {"StringNotEquals": {"ec2:ResourceTag/Owner": SELF},
-             "ArnNotEquals": {"aws:PrincipalArn": principals}})
-        add("DenyUnapprovedSharedAction" + suffix, "Deny", sorted(set(OWNED_ACTIONS["instance"]) - set(grant.actions)),
-            grant.resource_arn, foreign)
-        add("DenyExpiredSharedGrant" + suffix, "Deny", OWNED_ACTIONS["instance"], grant.resource_arn,
-            {"StringNotEquals": {"ec2:ResourceTag/Owner": SELF},
-             "DateGreaterThanEquals": {"aws:CurrentTime": grant.expires_at}})
-
-    # RunInstances is a multi-resource authorization. Check each destination
-    # separately; attaching RequestTag/InstanceType to source images would break
-    # normal launches and would not constrain the right resource.
-    destinations = arns("instance") + arns("volume") + arns("network-interface")
-    sources = sorted(config.approved_image_arns + config.approved_snapshot_arns
-                     + config.approved_subnet_arns + config.approved_security_group_arns)
-    add("ApprovedLaunchSources", "Allow", ["ec2:RunInstances"], sources)
-    if launch is not None:
-        # Whole-ARN variables are valid string-condition values, not Resource
-        # ARNs. Keep fixed account/region resource ARNs and bind the actual
-        # template through EC2's trusted LaunchTemplate context. Template Owner
-        # is also admin-controlled: members cannot tag or modify templates.
-        add("UseOwnMemberLaunchTemplates", "Allow", ["ec2:RunInstances"], template_resources,
-            {"StringEquals": {"ec2:LaunchTemplate": template_arns, "ec2:ResourceTag/Owner": SELF}})
-        add("DenyForeignMemberTemplateResource", "Deny", ["ec2:RunInstances"], template_resources, foreign)
-    add("TaggedLaunchDestinations", "Allow", ["ec2:RunInstances"], destinations, new_tags)
-    add("DenyUnapprovedLaunchResource", "Deny", ["ec2:RunInstances"],
-        sources + destinations + arns("key-pair") + template_resources, not_resource=True)
-    add("DenyUnapprovedInstanceType", "Deny", ["ec2:RunInstances", "ec2:StartInstances"], arns("instance"),
-        {"StringNotEquals": {"ec2:InstanceType": sorted(config.instance_types)}})
-    if launch is None:
-        add("DenyLaunchProfile", "Deny", ["ec2:RunInstances"], arns("instance"),
-            {"Null": {"ec2:InstanceProfile": "false"}})
-        add("DenyLaunchTemplate", "Deny", ["ec2:RunInstances"], arns("instance"),
-            {"Null": {"ec2:LaunchTemplate": "false"}})
-    else:
-        # These evaluate the resolved launch values, independently of whether
-        # they came from a template or caller overrides. Template versions and
-        # profile associations remain admin-only through DenyOtherEc2Actions.
-        add("DenyMissingOrForeignLaunchProfile", "Deny", ["ec2:RunInstances"], arns("instance"),
-            {"ArnNotEquals": {"ec2:InstanceProfile": profile_arn}})
-        template_condition = {"StringNotEquals": {"ec2:LaunchTemplate": template_arns}}
-        if not launch.require_template:
-            template_condition["Null"] = {"ec2:LaunchTemplate": "false"}
-        add("DenyUnapprovedMemberLaunchTemplate", "Deny", ["ec2:RunInstances"], arns("instance"), template_condition)
-        add("DenyImdsV1Launch", "Deny", ["ec2:RunInstances"], arns("instance"),
-            {"StringNotEquals": {"ec2:MetadataHttpTokens": "required"}})
-    # Unlike CreateNetworkInterface, RunInstances can refer to an existing ENI.
-    # Never permit that source path, even if a competing Allow is introduced.
-    add("DenyExistingLaunchInterface", "Deny", ["ec2:RunInstances"], arns("network-interface"),
-        {"StringLike": {"ec2:NetworkInterfaceID": "eni-*"}})
-    add("DenySpotLaunch", "Deny", ["ec2:RunInstances"], arns("instance"),
-        {"StringNotEquals": {"ec2:InstanceMarketType": "on-demand"}})
-    add("DenyDedicatedLaunch", "Deny", ["ec2:RunInstances"], arns("instance"),
-        {"StringNotEquals": {"ec2:Tenancy": "default"}})
-    add("DenyUnapprovedLaunchSnapshot", "Deny", ["ec2:RunInstances"], arns("volume"),
-        {"Null": {"ec2:ParentSnapshot": "false"},
-         "ArnNotEquals": {"ec2:ParentSnapshot": sorted(config.approved_snapshot_arns)}})
-
-    add("CreateTaggedBlankVolume", "Allow", ["ec2:CreateVolume"], arns("volume"), new_tags)
-    add("DenyVolumeSnapshotRestore", "Deny", ["ec2:CreateVolume"], arns("volume"),
-        {"Null": {"ec2:ParentSnapshot": "false"}})
-    add("ImportTaggedPublicKey", "Allow", ["ec2:ImportKeyPair"], arns("key-pair"), new_tags)
-
-    creation_sets = [("Launch", ["ec2:RunInstances"], destinations),
-                     ("Volume", ["ec2:CreateVolume"], arns("volume")),
-                     ("Key", ["ec2:ImportKeyPair"], arns("key-pair"))]
-    for suffix, actions, resources in creation_sets:
-        for tag, value in (("Owner", SELF), ("Project", "personal")):
-            add("DenyWrong" + tag + suffix, "Deny", actions, resources,
-                {"StringNotEquals": {"aws:RequestTag/" + tag: value}})
-        add("DenyUnknownTagKeys" + suffix, "Deny", actions, resources,
-            {"ForAnyValue:StringNotEquals": {"aws:TagKeys": ["Owner", "Project", "Name"]}})
-
-    tag_resources = destinations + arns("key-pair")
-    add("TagsOnlyDuringApprovedCreation", "Allow", ["ec2:CreateTags"], tag_resources,
-        {**new_tags, "StringEquals": {**new_tags["StringEquals"], "ec2:CreateAction": list(CREATE_ACTIONS)}})
-    add("RenameOwnedResources", "Allow", ["ec2:CreateTags"], tag_resources,
-        {"StringEquals": {"ec2:ResourceTag/Owner": SELF},
-         "ForAllValues:StringEquals": {"aws:TagKeys": ["Name"]}})
-    add("DenyDirectProtectedTagEdits", "Deny", ["ec2:CreateTags"],
-        condition={"StringNotEquals": {"ec2:CreateAction": list(CREATE_ACTIONS)},
-                   "ForAnyValue:StringNotEquals": {"aws:TagKeys": ["Name"]}})
-    add("DenyForeignDirectTagEdits", "Deny", ["ec2:CreateTags"],
-        condition={"StringNotEquals": {"ec2:CreateAction": list(CREATE_ACTIONS),
-                                       "ec2:ResourceTag/Owner": SELF}})
-    add("DenyDirectTagResourceOutsideOwnedKinds", "Deny", ["ec2:CreateTags"], tag_resources,
-        condition={"StringNotEquals": {"ec2:CreateAction": list(CREATE_ACTIONS)}}, not_resource=True)
-    # Name updates are the only direct tag edit. Owner, Project, tag-key casing,
-    # and every other tag stay protected. DeleteTags remains denied entirely.
-    # A live EC2 CreateTags pilot matched creation-only Denies in an existing-
-    # resource check that exposed Owner but no request-tag context. Avoid Null
-    # checks on CreateAction/TagKeys here. ForAllValues permits that owned-
-    # resource check; the tag-specific context rejects every non-Name request.
-    # Mandatory creation values are already enforced on the actual create APIs;
-    # ec2:CreateAction is service-controlled, never a caller-supplied parameter.
-    add("DenyOtherCreateTagKeys", "Deny", ["ec2:CreateTags"],
-        condition={"ForAnyValue:StringNotEquals": {"aws:TagKeys": ["Owner", "Project", "Name"]}})
-    add("DenyLargeEbsVolumes", "Deny", ["ec2:CreateVolume", "ec2:RunInstances", "ec2:ModifyVolume",
-        "ec2:CreateFleet", "ec2:RequestSpotFleet", "ec2:RequestSpotInstances", "ec2:ImportVolume",
-        "ec2:RestoreVolumeFromRecycleBin"],
+        add("OtherSharedPrincipal" + suffix, "Deny", READ_ACTIONS, grant.resource_arn,
+            {**foreign, "ArnNotEquals": {"aws:PrincipalArn": principals}}, not_action=True)
+        add("OtherSharedAction" + suffix, "Deny", READ_ACTIONS + tuple(sorted(grant.actions)),
+            grant.resource_arn, foreign, not_action=True)
+        add("ExpiredSharedGrant" + suffix, "Deny", READ_ACTIONS, grant.resource_arn,
+            {**foreign, "DateGreaterThanEquals": {"aws:CurrentTime": grant.expires_at}}, not_action=True)
+    # A new instance may omit a profile; only the caller's existing S3 profile
+    # may be supplied explicitly. Background automation attaches it when absent.
+    role = "arn:aws:iam::" + config.account_id + ":role/wanglab/member-s3/" + SELF
+    profile = "arn:aws:iam::" + config.account_id + ":instance-profile/wanglab/member-s3/" + SELF
+    add("PassOwnS3Role", "Allow", ["iam:PassRole"], role,
+        {"StringEquals": {"iam:PassedToService": "ec2.amazonaws.com"}})
+    add("ForeignPassRole", "Deny", ["iam:PassRole"], role, not_resource=True)
+    add("OtherRoleService", "Deny", ["iam:PassRole"],
+        condition={"StringNotEquals": {"iam:PassedToService": "ec2.amazonaws.com"}})
+    add("ForeignLaunchProfile", "Deny", ["ec2:RunInstances"], arns("instance"),
+        {"Null": {"ec2:InstanceProfile": "false"}, "ArnNotEquals": {"ec2:InstanceProfile": profile}})
+    add("ConsoleIdentity", "Allow", ["iam:ListInstanceProfiles", "iam:GetUser", "iam:ListMFADevices",
+        "iam:GetInstanceProfile", "iam:GetRole", "iam:ListInstanceProfilesForRole"])
+    add("PublicAmiParameters", "Allow", ["ssm:GetParameter", "ssm:GetParameters"],
+        ["arn:aws:ssm:%s::parameter/aws/service/*" % r for r in sorted(config.regions)])
+    # Canonical ownership is supplied by the trusted CloudTrail reconciler.
+    # Ordinary custom tags work on creation and existing resources.
+    # Private provenance keys do not reserve ordinary Owner/Project/custom tags.
+    add("ProtectAttribution", "Deny", ["ec2:CreateTags", "ec2:DeleteTags"],
+        condition={"ForAnyValue:StringEqualsIgnoreCase": {"aws:TagKeys": ["wanglab:Owner", "wanglab:CreatorUserId"]}})
+    add("ForeignTags", "Deny", ["ec2:CreateTags", "ec2:DeleteTags"], condition=foreign)
+    add("SnapshotAccount", "Deny", ["ec2:DeleteSnapshot", "ec2:ModifySnapshotAttribute"],
+        condition={"StringNotEquals": {"ec2:Owner": config.account_id}})
+    add("PerVolumeLimit", "Deny", ["ec2:RunInstances", "ec2:CreateVolume", "ec2:ModifyVolume"],
         condition={"NumericGreaterThan": {"ec2:VolumeSize": "1024"}})
-
-    result: Dict[str, Dict[str, Any]] = {}
+    # These change account-wide defaults or create prepaid commitments. They
+    # are administrative decisions, unrelated to ordinary instance creation.
+    add("AccountAndCommitments", "Deny", ["ec2:ModifyDefaultCreditSpecification", "ec2:DisableEbsEncryptionByDefault",
+        "ec2:ModifyEbsDefaultKmsKeyId", "ec2:ResetEbsDefaultKmsKeyId", "ec2:DisableImageBlockPublicAccess",
+        "ec2:DisableSnapshotBlockPublicAccess", "ec2:PurchaseReservedInstancesOffering",
+        "ec2:PurchaseHostReservation", "ec2:PurchaseCapacityBlock", "ec2:AcceptReservedInstancesExchangeQuote"])
+    # Account identity and data-role administration can bypass ownership guards.
+    # Unrelated services are neither granted nor blanket-denied by this policy.
+    add("ProtectIdentityAndDataRoles", "Deny", ["iam:TagUser", "iam:UntagUser", "sts:AssumeRole", "sts:TagSession",
+        "iam:CreateRole", "iam:UpdateAssumeRolePolicy", "iam:PutRolePolicy", "iam:AttachRolePolicy",
+        "iam:AddRoleToInstanceProfile", "iam:RemoveRoleFromInstanceProfile", "iam:CreateInstanceProfile"])
+    result = {}
     current = {"Version": VERSION, "Statement": []}
     for statement in statements:
         candidate = {"Version": VERSION, "Statement": current["Statement"] + [statement]}
@@ -414,5 +289,5 @@ def build_policy_bundle(config: MemberEc2Config, *, max_policy_size: int = 6144)
     if current["Statement"]:
         result["WangLabMemberEC2%02d" % (len(result) + 1)] = current
     if len(result) > 6:
-        raise ValueError("bundle exceeds six group attachments; reduce reviewed inputs or request a quota review")
+        raise ValueError("bundle exceeds six group attachments")
     return result

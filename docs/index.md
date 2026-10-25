@@ -4,7 +4,7 @@ This documentation covers local tooling for:
 
 - AWS inventory reports
 - EC2 compute cost allocation
-- personal EC2 console launch templates and membership-driven S3 instance roles
+- native EC2 console/CLI creation with background ownership and personal S3 roles
 - S3 access reconciliation
 - audit alert setup
 - AWS ParallelCluster and Slurm workflows

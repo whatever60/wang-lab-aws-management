@@ -60,7 +60,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             config = validate_runtime_config(value, account_id=account, region="us-east-1")
             iam, s3 = session.client("iam"), session.client("s3")
             manifest = live_member_manifest(iam, s3, account_id=account)
-            parsed = config_from_mapping({**config, "s3_manifest": manifest})
+            parsed = config_from_mapping({**{k: v for k, v in config.items() if k != "native_since"}, "s3_manifest": manifest})
             result = reconcile(iam, {r: session.client("ec2", region_name=r) for r in config["ec2_config"]["regions"]},
                                parsed, s3=s3, execute=False)
     print(json.dumps(result, indent=2, sort_keys=True))

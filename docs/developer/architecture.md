@@ -41,24 +41,28 @@ implementation.
 `member_access` separates configuration models, S3-only role policy state,
 metadata reconciliation, the Lambda runtime and offline deployment rendering.
 The deployed runtime derives members from IAM and home ownership from bucket
-tags; approved infrastructure is deployed directly in the Lambda environment. It uses the
-same launch-request and EC2 policy builders as the local tooling. See
+tags; minimal account/region and cutover configuration lives in the Lambda environment.
+Native EC2 creation is attributed from CloudTrail, and blank new-instance profiles
+receive the verified creator's personal S3 role in the background. See
 [member launch automation](../admin/member_launch_automation.md) for the trust
 boundary, serialized event handling and lifecycle behavior.
 
 ## Keep One Implementation
 
 The member controller has one CloudFormation definition. One EventBridge rule
-handles IAM events and its five-minute repair schedule. The Lambda uses native
-asynchronous retries, CloudWatch logs and an error alarm; periodic reconciliation
-reads current state, so it does not need an event replay queue. Nonsecret launch
+handles IAM and successful EC2 creation events plus its five-minute repair
+schedule. The Lambda uses native asynchronous retries, CloudWatch logs and an
+error alarm; periodic reconciliation reads current state, so it does not need
+an event replay queue. Nonsecret account/region
 configuration fits in the Lambda environment and does not need an SSM lookup.
 Unchanged state needs one resource scan; planned changes retain stale-plan and
 grant-time identity/ownership checks.
 
 The audit shell entry point delegates to the Python command. Retain independent
-security boundaries: personal S3 roles isolate members' data writes; personal
-templates prefill each member's role, key and tags. IAM policy splitting exists
+security boundaries: personal S3 roles isolate members' data writes; background
+creator attribution and profile attachment preserve the normal AWS console and
+CLI workflow. EC2 is allowed by default with explicit damage guardrails, not an
+operation whitelist. IAM policy splitting exists
 for AWS's document-size limit. Those resources perform distinct jobs.
 
 CloudTrail/Config feed audit and historical cost allocation. Auto-stop alarms,
