@@ -48,7 +48,11 @@ The HPC tooling rejects duplicate UIDs and normalized Linux names.
    `aws-audit s3-access apply --sync-member-access` after reviewing the full
    manifest. Membership events also trigger synchronization, with a five-minute
    scheduled fallback. Verify four personal template pointers, the bounded
-   S3-only role and profile, and launch authorization. Review the
+   S3-only role and profile, and launch authorization. Where member CLI
+   credentials are being delivered, use that member's actual identity for
+   `RunInstances` with `DryRun=true` on each personal template, plus an intended
+   instance-type override. Expect `DryRunOperation`; administrator credentials
+   or IAM simulation alone do not verify the member's launch path. Review the
    [automation runbook](member_launch_automation.md) for prerequisites and
    failure handling.
 9. Verify the new CLI identity, own-bucket read/write, approved-bucket reads,
@@ -58,7 +62,11 @@ The HPC tooling rejects duplicate UIDs and normalized Linux names.
    does not install a key on a Linux account. Review node targets and deployment
    prerequisites before executing synchronization.
 11. Deliver credentials and the private key only to the confirmed recipient via
-    the explicitly authorized channel. Record delivery metadata without secrets.
+    the explicitly authorized channel. Include the deployment region, their
+    exact personal template names, **EC2 → Launch Templates → Actions → Launch
+    instance from template**, and the [launch guide](../user/ec2_launch.md).
+    Explain that the template is required and that approved instance types can
+    be changed before launch. Record delivery metadata without secrets.
 
 Members use the [EC2 console launch workflow](../user/ec2_launch.md); personal
 templates supply ownership tags, a default owned key, network settings and the

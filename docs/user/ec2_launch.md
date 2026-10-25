@@ -5,6 +5,10 @@ Use your personal **EC2 Launch Templates** in **US East (N. Virginia),
 network settings, and your personal S3 instance role. You do not need to enter
 three sets of resource tags by hand.
 
+Start with **Launch instance from template**. The member policy requires your
+personal template; a plain **Launch instance** request without a template is
+denied even if the selected instance type is approved.
+
 ## Choose a Template
 
 1. Sign in with your own IAM account and select `us-east-1`.
@@ -28,6 +32,12 @@ still contains your unchanged exact IAM username, and select the desired flavor.
 The console lets you review and override template parameters before launching.
 The IAM policy still checks the final request.
 [AWS console launch-template instructions](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/launch-instances-from-launch-template.html)
+
+The flavor selects the operating-system image, rather than fixing the machine
+size. For work requiring more RAM, start with the Ubuntu or Amazon Linux
+template and select an approved instance type with enough memory. Increasing
+the **Storage** volume size increases disk capacity, not RAM; the 1024 GiB
+per-volume limit concerns disk storage.
 
 ## Review and Launch
 
