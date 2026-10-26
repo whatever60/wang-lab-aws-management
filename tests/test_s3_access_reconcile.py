@@ -3,6 +3,7 @@ from copy import deepcopy
 from unittest import mock
 
 from aws_audit.s3_access import reconcile
+from test_ec2_access import decision
 
 
 class S3AccessReconcileTest(unittest.TestCase):
@@ -37,6 +38,23 @@ class S3AccessReconcileTest(unittest.TestCase):
             "WangLabS3AccessAdminWriteSharedOpsAndReadService",
         )
         self.assertEqual(reconcile.ALUMNI_BASE_POLICY_NAME, "WangLabS3AccessAlumniBase")
+
+    def test_bucket_creation_prohibition_survives_broad_grants_and_preserves_admins(self) -> None:
+        bundle = {"member": reconcile.member_write_policy()}
+        for action in ("s3:CreateBucket", "s3express:CreateBucket",
+                       "s3tables:CreateTableBucket", "s3vectors:CreateVectorBucket"):
+            for role in (None, "CurrentMember", "Alumni"):
+                context = {} if role is None else {"aws:PrincipalTag/AccessRole": role}
+                self.assertEqual(decision(bundle, action, context=context, competing_allow=True), "explicitDeny")
+            self.assertEqual(decision(bundle, action, context={"aws:PrincipalTag/AccessRole": "Admin"},
+                                      competing_allow=True), "allowed")
+
+    def test_bucket_creation_guard_preserves_existing_home_object_access(self) -> None:
+        bundle = {"member": reconcile.member_write_policy()}
+        context = {"aws:PrincipalTag/AccessRole": "CurrentMember", "aws:PrincipalTag/HomeBucket": "member-home"}
+        for action in ("s3:PutObject", "s3:DeleteObject"):
+            self.assertEqual(decision(bundle, action, "arn:aws:s3:::member-home/example", context), "allowed")
+            self.assertEqual(decision(bundle, action, "arn:aws:s3:::other-home/example", context), "implicitDeny")
 
     def test_bucket_guardrails_use_live_account_sids(self) -> None:
         """Desired bucket guardrail statements use live WangLab SIDs."""

@@ -33,6 +33,12 @@ BUCKET_LIST_ACTIONS = [
     "s3:GetLifecycleConfiguration",
 ]
 OBJECT_READ_ACTIONS = ["s3:GetObject", "s3:GetObjectVersion"]
+BUCKET_CREATE_ACTIONS = [
+    "s3:CreateBucket",
+    "s3express:CreateBucket",
+    "s3tables:CreateTableBucket",
+    "s3vectors:CreateVectorBucket",
+]
 ALUMNI_EC2_DESCRIBE_ACTIONS = [
     "ec2:DescribeInstances",
     "ec2:DescribeRegions",
@@ -366,7 +372,7 @@ def read_policy(manifest: dict[str, Any]) -> dict[str, Any]:
 
 
 def member_write_policy() -> dict[str, Any]:
-    """Build the current-member/admin own-bucket write policy."""
+    """Own-home writes; only administrators may provision new S3 buckets."""
     return {
         "Version": "2012-10-17",
         "Statement": [
@@ -375,7 +381,17 @@ def member_write_policy() -> dict[str, Any]:
                 "Effect": "Allow",
                 "Action": OBJECT_WRITE_ACTIONS,
                 "Resource": "arn:aws:s3:::${aws:PrincipalTag/HomeBucket}/*",
-            }
+            },
+            {
+                "Sid": "DenyBucketCreationUnlessAdmin",
+                "Effect": "Deny",
+                "Action": list(BUCKET_CREATE_ACTIONS),
+                "Resource": "*",
+                # This existing policy is also attached to the admin group.
+                # AccessRole is already the trusted S3 identity attribute;
+                # missing/non-admin tags must not bypass the prohibition.
+                "Condition": {"StringNotEquals": {"aws:PrincipalTag/AccessRole": "Admin"}},
+            },
         ],
     }
 

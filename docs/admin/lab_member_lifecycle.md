@@ -29,6 +29,9 @@ The HPC tooling rejects duplicate UIDs and normalized Linux names.
 
 ## Onboard A Current Member
 
+Administrators create new S3 buckets; ordinary members use the existing buckets
+assigned through this workflow. Member self-service EC2 creation remains native.
+
 1. Confirm the recipient and intended member/project access.
 2. Create the IAM user with the three tags and add it to `lab_members`.
 3. Create a console login requiring a password reset. If programmatic access is

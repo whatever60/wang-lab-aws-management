@@ -7,6 +7,8 @@ Members use the ordinary AWS console, CLI and SDK. EC2 is allowed by default;
 explicit guardrails protect other people's resources and shared account
 settings. Ownership and personal S3 access are handled in the background, with
 no required template, special tags or repository command.
+S3 bucket creation is an explicit exception: administrators provision new
+buckets, and ordinary members use existing lab buckets.
 
 The repo now exposes one command:
 

@@ -68,6 +68,14 @@ uv run aws-audit s3-access plan --manifest path/to/manifest.local.json
 
 ## Model
 
+New S3 buckets are provisioned by administrators. Ordinary members cannot
+create buckets, including in `us-east-1`; this is an explicit exception to
+normal self-service resource creation. The existing member/admin own-home
+write policy denies general-purpose, directory, table and vector bucket
+creation unless the trusted `AccessRole` principal tag is `Admin`. Missing
+tags do not bypass the deny. Administrator bucket creation still follows
+the primary-region guardrail and the existing manifest/ownership workflow.
+
 Users have an `AccessRole` and optionally a `HomeBucket`. Buckets have a `BucketScope`
 and optionally a `BucketOwner`.
 
