@@ -21,16 +21,7 @@ PREFIX = "arn:aws:ec2:" + REGION + ":" + ACCOUNT + ":"
 
 
 def configuration():
-    ec2 = {"account_id": ACCOUNT, "regions": [REGION], "instance_types": ["t3.micro"],
-           "approved_image_arns": ["arn:aws:ec2:" + REGION + "::image/ami-11111111111111111"],
-           "approved_snapshot_arns": ["arn:aws:ec2:" + REGION + "::snapshot/snap-11111111111111111"],
-           "approved_subnet_arns": [PREFIX + "subnet/subnet-11111111111111111"],
-           "approved_security_group_arns": [PREFIX + "security-group/sg-11111111111111111"]}
-    flavors = [{"name": name, "region": REGION, "image_id": "ami-11111111111111111",
-                "instance_type": "t3.micro", "subnet_id": "subnet-11111111111111111",
-                "security_group_id": "sg-11111111111111111"}
-               for name in ("Ubuntu2404", "Al2023", "DL2204", "DL2404")]
-    return {"ec2_config": ec2, "flavors": flavors, "member_group": "lab_members",
+    return {"ec2_config": {"account_id": ACCOUNT, "regions": [REGION]}, "member_group": "lab_members",
             "permissions_boundary_arn": "arn:aws:iam::" + ACCOUNT + ":policy/MemberS3Boundary"}
 
 
@@ -103,10 +94,9 @@ class MemberAccessRuntimeTest(unittest.TestCase):
         for region, account in (("eu-west-1", ACCOUNT), (REGION, "999999999999")):
             with self.assertRaises(runtime.RuntimeValidationError):
                 runtime.validate_runtime_config(good, account_id=account, region=region)
-        for change in ({"image_id": "ami-22222222222222222"}, {"region": "us-west-2"},
-                       {"name": "Other"}, {"instance_type": "p5.48xlarge"}):
+        for change in ({"regions": []}, {"regions": ["not-a-region"]}, {"instance_types": ["t3.micro"]}):
             value = copy.deepcopy(good)
-            value["flavors"][0].update(change)
+            value["ec2_config"].update(change)
             with self.subTest(change=change), self.assertRaises(runtime.RuntimeValidationError):
                 runtime.validate_runtime_config(value, account_id=ACCOUNT, region=REGION)
 
@@ -248,10 +238,10 @@ class MemberAccessRuntimeTest(unittest.TestCase):
         with self.assertRaises(runtime.ReconciliationError) as captured:
             self.run_sync(Iam(), S3(), lambda *args: failed)
         self.assertEqual(captured.exception.diagnostic["code"], "AccessDenied")
-        succeeded = {"errors": {}, "counts": {"active": 0, "pending_key": 1, "blocked": 0, "operations": 1}}
+        succeeded = {"errors": {}, "counts": {"active": 0, "blocked": 1, "operations": 1}}
         result = self.run_sync(Iam(), S3(), lambda *args: succeeded)
         self.assertEqual(result["planned_active"], 0)
-        self.assertEqual(result["pending_key"], 1)
+        self.assertEqual(result["resource_blocked"], 1)
 
     def test_lambda_envelope_does_not_supply_membership_or_log_its_contents(self):
         iam, s3 = Iam(), S3()
@@ -294,24 +284,10 @@ class MemberAccessRuntimeTest(unittest.TestCase):
         self.assertEqual(runtime._trigger({"source": "aws.events", "detail-type": "Scheduled Event"}, ACCOUNT), "schedule")
         self.assertEqual(runtime._trigger({"source": "wanglab.member-access", "action": "reconcile"}, ACCOUNT), "manual")
 
-    def test_only_exact_controller_generated_pointer_events_are_ignored(self):
-        from aws_audit.member_access.models import USER_TAG_KEYS
-        event = {"source": "aws.iam", "account": ACCOUNT, "detail-type": "AWS API Call via CloudTrail",
-                 "detail": {"eventSource": "iam.amazonaws.com", "eventName": "TagUser",
-                            "userIdentity": {"type": "AssumedRole", "sessionContext": {"sessionIssuer": {
-                                "arn": "arn:aws:iam::" + ACCOUNT + ":role/WangLabMemberAccessSync"}}},
-                            "requestParameters": {"tags": [{"key": key, "value": "derived pointer"} for key in USER_TAG_KEYS]}}}
-        self.assertEqual(runtime._trigger(event, ACCOUNT), "ignored")
-        changed = copy.deepcopy(event)
-        changed["detail"]["requestParameters"]["tags"].append({"key": "HomeBucket", "value": "new-home"})
-        self.assertEqual(runtime._trigger(changed, ACCOUNT), "iam")
-        changed = copy.deepcopy(event)
-        changed["detail"]["userIdentity"]["sessionContext"]["sessionIssuer"]["arn"] += "Other"
-        self.assertEqual(runtime._trigger(changed, ACCOUNT), "iam")
-        changed = copy.deepcopy(event)
-        changed["detail"]["eventName"] = "UntagUser"
-        changed["detail"]["requestParameters"] = {"tagKeys": list(USER_TAG_KEYS)}
-        self.assertEqual(runtime._trigger(changed, ACCOUNT), "ignored")
+    def test_iam_events_reconcile_without_legacy_pointer_suppression(self):
+        event = {"source": "aws.iam", "detail-type": "AWS API Call via CloudTrail",
+                 "detail": {"eventSource": "iam.amazonaws.com", "eventName": "TagUser"}}
+        self.assertEqual(runtime._trigger(event, ACCOUNT), "iam")
 
     def test_offline_package_uses_only_fixed_sources_and_is_deterministic(self):
         with tempfile.TemporaryDirectory() as directory:

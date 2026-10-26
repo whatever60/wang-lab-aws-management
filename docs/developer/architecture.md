@@ -65,9 +65,12 @@ CLI workflow. EC2 is allowed by default with explicit damage guardrails, not an
 operation whitelist. IAM policy splitting exists
 for AWS's document-size limit. Those resources perform distinct jobs.
 
-CloudTrail/Config feed audit and historical cost allocation. Auto-stop alarms,
-Slack audit enrichment, inventory reporting and optional HPC tooling also have
-separate consumers. Keep them until a replacement preserves their behavior.
+One multi-Region CloudTrail quietly archives API activity; AWS Config records
+resource history in the primary region for audit and cost attribution. Routine
+Slack audit processing and its dedicated state, topic and role are retired.
+Existing CPU auto-stop alarms, inventory reporting and optional HPC tooling
+remain separate functions. The two CPU-alarm/tagging Lambda functions use Python
+3.12 with their existing code, thresholds and stop actions preserved.
 
 ## Generated Files
 

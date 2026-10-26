@@ -4,7 +4,7 @@ IAM groups and user tags define lab membership and stable HPC identities. The
 ignored local S3 manifest inventories every account user and bucket for access
 reconciliation. Keep these sources consistent; neither tool creates the other's
 users or buckets implicitly. The deployed member-access controller automatically
-maintains personal launch templates and S3-only instance roles from live
+maintains S3-only instance roles from live
 membership and ownership metadata.
 
 Keep real rosters, resource names, account identifiers, and operational records in
@@ -73,12 +73,10 @@ instances; existing machines and profiles are not retrofitted.
 2. Retag the home bucket's `OwnerAccessRole=Alumni` and update the full local S3
    manifest. Preserve approved reads and deny writes, including to the old home.
 3. Run `aws-audit member-access sync` and verify the managed role has an explicit
-   deny-all state and legacy IAM template pointers are removed where present.
-   Automatic IAM
+   deny-all state. Automatic IAM
    event handling and the scheduled fallback also reconcile this state. Both
    existing role credentials and new EC2 role sessions lose authorization after
-   IAM propagation; this is not an instantaneous revocation guarantee. Templates
-   remain for audit history, with new launches denied.
+   IAM propagation; this is not an instantaneous revocation guarantee.
 4. Publish the HPC roster change and synchronize managed nodes. Preserve the
    retired UID in roster history; do not delete home data or assign the identity
    to someone else.

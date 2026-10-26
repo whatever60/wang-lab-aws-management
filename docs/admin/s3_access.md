@@ -45,8 +45,8 @@ Apply:
 uv run aws-audit s3-access apply
 ```
 
-When the member-launch controller is deployed, synchronize personal instance
-roles and launch templates immediately after a successful apply:
+When the member-access controller is deployed, synchronize personal instance
+roles immediately after a successful apply:
 
 ```bash
 uv run aws-audit s3-access apply --sync-member-access

@@ -13,7 +13,6 @@ import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from ..ec2_access.launch import build_launch_request
 from ..ec2_access.policy import config_from_mapping as ec2_config_from_mapping
 
 
@@ -26,7 +25,6 @@ PACKAGE_FILES = (
     "aws_audit/__init__.py",
     "aws_audit/ec2_access/__init__.py",
     "aws_audit/ec2_access/policy.py",
-    "aws_audit/ec2_access/launch.py",
     "aws_audit/member_access/__init__.py",
     "aws_audit/member_access/models.py",
     "aws_audit/member_access/policies.py",
@@ -77,7 +75,7 @@ def validate_runtime_config(value: Any, *, account_id: str, region: str) -> Dict
     _account(account_id)
     if region != CONTROL_REGION:
         raise RuntimeValidationError("IAM reconciliation must run in us-east-1")
-    if not isinstance(value, dict) or set(value) - {"ec2_config", "flavors", "member_group", "permissions_boundary_arn", "native_since"}:
+    if not isinstance(value, dict) or set(value) - {"ec2_config", "member_group", "permissions_boundary_arn", "native_since"}:
         raise RuntimeValidationError("runtime configuration accepts infrastructure only")
     if "ec2_config" not in value:
         raise RuntimeValidationError("runtime configuration requires an EC2 account and regions")
@@ -92,27 +90,7 @@ def validate_runtime_config(value: Any, *, account_id: str, region: str) -> Dict
     boundary = value.get("permissions_boundary_arn")
     if not isinstance(boundary, str) or not re.fullmatch(r"arn:aws:iam::" + account_id + r":policy/[A-Za-z0-9_+=,.@/\-]+", boundary):
         raise RuntimeValidationError("runtime requires an exact same-account role permissions boundary")
-    flavors = value.get("flavors", [])
-    expected = {"Ubuntu2404", "Al2023", "DL2204", "DL2404"}
-    if not isinstance(flavors, list) or len(flavors) not in (0, len(expected)):
-        raise RuntimeValidationError("flavors must be empty for native launches or contain the four optional templates")
-    names = set()
-    for flavor in flavors:
-        fields = {"name", "region", "image_id", "instance_type", "subnet_id", "security_group_id"}
-        if (not isinstance(flavor, dict) or set(flavor) != fields
-                or any(not isinstance(item, str) for item in flavor.values()) or flavor["name"] not in expected):
-            raise RuntimeValidationError("invalid launch flavor")
-        names.add(flavor["name"])
-        try:
-            build_launch_request(ec2, username="RuntimeValidation", key_name="validation-only",
-                                 instance_type=flavor["instance_type"], region=flavor["region"],
-                                 image_id=flavor["image_id"], subnet_id=flavor["subnet_id"],
-                                 security_group_id=flavor["security_group_id"])
-        except (TypeError, ValueError):
-            raise RuntimeValidationError("launch flavor is outside approved EC2 sources") from None
-    if flavors and names != expected:
-        raise RuntimeValidationError("launch flavor names must be unique and exact")
-    result = {"ec2_config": value["ec2_config"], "flavors": flavors, "member_group": "lab_members",
+    result = {"ec2_config": value["ec2_config"], "member_group": "lab_members",
               "permissions_boundary_arn": boundary}
     if "native_since" in value:
         from datetime import datetime
@@ -233,7 +211,7 @@ def live_member_manifest(iam: Any, s3: Any, *, account_id: str, member_group: st
 def _backend(iam: Any, ec2_by_region: dict, config: dict, s3: Any) -> Any:
     from .models import config_from_mapping
     from .reconcile import reconcile
-    return reconcile(iam, ec2_by_region, config_from_mapping({k: v for k, v in config.items() if k != "native_since"}), s3=s3, execute=True)
+    return reconcile(iam, config_from_mapping({k: v for k, v in config.items() if k != "native_since"}), s3=s3, execute=True)
 
 
 def run_reconciliation(iam: Any, s3: Any, ec2_by_region: dict, config: dict, *,
@@ -275,7 +253,7 @@ def run_reconciliation(iam: Any, s3: Any, ec2_by_region: dict, config: dict, *,
             counts = outcome.get("counts", {}) if isinstance(outcome, dict) else {}
             counts = counts if isinstance(counts, dict) else {}
             progress = {target: counts[key] for key, target in
-                        (("active", "planned_active"), ("pending_key", "pending_key"),
+                        (("active", "planned_active"),
                          ("blocked", "resource_blocked"), ("operations", "planned_operations"))
                         if type(counts.get(key)) is int and counts[key] >= 0}
             return {"status": "reconciled", "passes": attempt,
@@ -319,41 +297,8 @@ def _trigger(event: Any, account_id: str) -> str:
     if (event.get("source") == "aws.iam" and event.get("detail-type") == "AWS API Call via CloudTrail"
             and isinstance(detail, dict) and detail.get("eventSource") == "iam.amazonaws.com"
             and detail.get("eventName") in IAM_EVENTS):
-        if _self_pointer_event(detail, account_id):
-            return "ignored"
         return "iam"
     return "ignored"
-
-
-def _self_pointer_event(detail: dict, account_id: str) -> bool:
-    """Avoid queuing another full pass for this controller's derived pointers.
-
-    Events never authorize grants. A malformed/unexpected event still performs
-    full live reconciliation, and periodic reconciliation repairs all pointers.
-    """
-    if detail.get("eventName") not in ("TagUser", "UntagUser"):
-        return False
-    identity = detail.get("userIdentity", {})
-    if not isinstance(identity, dict) or identity.get("type") != "AssumedRole":
-        return False
-    session = identity.get("sessionContext", {})
-    issuer = session.get("sessionIssuer", {}) if isinstance(session, dict) else {}
-    if not isinstance(issuer, dict) or issuer.get("arn") != "arn:aws:iam::" + account_id + ":role/WangLabMemberAccessSync":
-        return False
-    request = detail.get("requestParameters", {})
-    if not isinstance(request, dict):
-        return False
-    if detail["eventName"] == "TagUser":
-        rows = request.get("tags", [])
-        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-            return False
-        keys = [row.get("key", row.get("Key")) for row in rows]
-    else:
-        keys = request.get("tagKeys", [])
-    if not isinstance(keys, list) or any(not isinstance(key, str) for key in keys):
-        return False
-    from .models import USER_TAG_KEYS
-    return len(keys) == len(USER_TAG_KEYS) and set(keys) == set(USER_TAG_KEYS)
 
 
 def _aws_client(service: str, region: str) -> Any:

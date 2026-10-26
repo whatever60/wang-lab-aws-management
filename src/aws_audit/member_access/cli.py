@@ -25,9 +25,9 @@ def sync(function_name: str = FUNCTION_NAME) -> dict:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    parser = argparse.ArgumentParser(description="Manage personal console launch templates and S3-only instance roles")
+    parser = argparse.ArgumentParser(description="Manage native EC2 ownership and personal S3 instance roles")
     commands = parser.add_subparsers(dest="command", required=True)
-    plan_parser = commands.add_parser("plan", help="Read live IAM/S3/EC2 metadata and show changes without applying")
+    plan_parser = commands.add_parser("plan", help="Read live IAM/S3 metadata and show role changes without applying")
     plan_parser.add_argument("--config", type=Path, default=Path("config/member_access.local.json"))
     sync_parser = commands.add_parser("sync", help="Invoke the deployed serialized lifecycle reconciler")
     sync_parser.add_argument("--function-name", default=FUNCTION_NAME)
@@ -61,8 +61,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             iam, s3 = session.client("iam"), session.client("s3")
             manifest = live_member_manifest(iam, s3, account_id=account)
             parsed = config_from_mapping({**{k: v for k, v in config.items() if k != "native_since"}, "s3_manifest": manifest})
-            result = reconcile(iam, {r: session.client("ec2", region_name=r) for r in config["ec2_config"]["regions"]},
-                               parsed, s3=s3, execute=False)
+            result = reconcile(iam, parsed, s3=s3, execute=False)
     print(json.dumps(result, indent=2, sort_keys=True))
 
 

@@ -13,7 +13,6 @@ from dataclasses import asdict, replace
 from datetime import datetime
 
 from aws_audit.ec2_access import MemberEc2Config, SharedGrant, build_policy_bundle, config_from_mapping, policy_size
-from aws_audit.ec2_access.policy import MemberLaunchConfig
 
 
 ACCOUNT = "123456789012"
@@ -28,15 +27,12 @@ SNAPSHOT = "arn:aws:ec2:" + REGION + "::snapshot/snap-11111111111111111"
 SUBNET = BASE + "subnet/subnet-11111111111111111"
 SG = BASE + "security-group/sg-11111111111111111"
 ALICE = "arn:aws:iam::" + ACCOUNT + ":user/Alice"
-TEMPLATE_KEYS = ("MemberLaunchUbuntu2404", "MemberLaunchAl2023", "MemberLaunchDL2204", "MemberLaunchDL2404")
-TEMPLATES = tuple(BASE + "launch-template/lt-" + ("%017x" % item) for item in range(1, 5))
 PROFILE = "arn:aws:iam::" + ACCOUNT + ":instance-profile/wanglab/member-s3/Alice"
 ROLE = "arn:aws:iam::" + ACCOUNT + ":role/wanglab/member-s3/Alice"
 
 
 def config():
-    return MemberEc2Config(ACCOUNT, (REGION,), ("t3.small", "g6.xlarge"),
-                           (IMAGE,), (SNAPSHOT,), (SUBNET,), (SG,))
+    return MemberEc2Config(ACCOUNT, (REGION,))
 
 
 def values(value):
@@ -134,12 +130,6 @@ def owned(**extra):
     return member_context(**{"ec2:ResourceTag/wanglab:Owner": "Alice", **extra})
 
 
-def managed_member_context(**extra):
-    return tagged(**{"aws:PrincipalTag/AccessRole": "CurrentMember", "aws:PrincipalTag/HomeBucket": "member-home",
-                      **{"aws:PrincipalTag/" + key: arn for key, arn in zip(TEMPLATE_KEYS, TEMPLATES)},
-                      "ec2:InstanceType": "g6.xlarge", "ec2:InstanceMarketType": "on-demand", "ec2:Tenancy": "default",
-                      "ec2:MetadataHttpTokens": "required", "ec2:InstanceProfile": PROFILE,
-                      "ec2:LaunchTemplate": TEMPLATES[0], **extra})
 
 
 class NativeMemberEc2PolicyTest(unittest.TestCase):
@@ -152,8 +142,7 @@ class NativeMemberEc2PolicyTest(unittest.TestCase):
 
     def test_minimal_native_configuration_has_no_ami_type_template_registry(self):
         cfg = config_from_mapping({"account_id": ACCOUNT, "regions": [REGION]})
-        self.assertFalse(cfg.approved_image_arns)
-        self.assertFalse(cfg.instance_types)
+        self.assertEqual(set(asdict(cfg)), {"account_id", "regions", "shared_grants"})
         self.assertEqual(build_policy_bundle(cfg), build_policy_bundle(cfg))
         for doc in self.bundle.values():
             self.assertLessEqual(policy_size(doc), 6144)
@@ -228,7 +217,11 @@ class NativeMemberEc2PolicyTest(unittest.TestCase):
 
     def test_account_defaults_and_prepaid_commitments_require_administration(self):
         for action in ("ec2:DisableEbsEncryptionByDefault", "ec2:ModifyDefaultCreditSpecification",
-                       "ec2:PurchaseReservedInstancesOffering", "ec2:PurchaseCapacityBlock"):
+                       "ec2:PurchaseReservedInstancesOffering", "ec2:PurchaseCapacityBlock",
+                       "ec2:PurchaseCapacityBlockExtension", "ec2:CreateCapacityReservation",
+                       "ec2:CreateCapacityReservationFleet", "ec2:AllocateHosts",
+                       "ec2:ModifyVpcBlockPublicAccessOptions", "ec2:EnableSnapshotBlockPublicAccess",
+                       "ec2:AcceptCapacityReservationBillingOwnership"):
             self.check("explicitDeny", action, broad=True)
 
     def test_snapshot_deletion_account_and_canonical_owner_are_checked(self):

@@ -24,7 +24,7 @@ TARGET_FIELDS = {
     "CreateLaunchTemplate": "launchTemplateId", "CopySnapshot": "snapshotId", "CopyImage": "imageId",
 }
 NATIVE_EVENTS = ("RunInstances", "CreateVolume", "CreateKeyPair", "ImportKeyPair",
-                 "CreateSecurityGroup", "CreateSnapshot", "CreateImage", *TARGET_FIELDS)
+                 "CreateSecurityGroup", "CreateSnapshot", "CreateSnapshots", "CreateImage", *TARGET_FIELDS)
 OWNER_TAG = "wanglab:Owner"
 CREATOR_TAG = "wanglab:CreatorUserId"
 
@@ -70,6 +70,17 @@ def _resources(ec2, event, since):
     """Return only newly created resources identified by an AWS audit response."""
     response = event.get("responseElements") or {}
     name = event["eventName"]
+    if name == "CreateSnapshots":
+        result = response.get("CreateSnapshotsResponse", response)
+        snapshot_set = result.get("snapshotSet", {})
+        rows = snapshot_set.get("item", snapshot_set.get("items", []))
+        if isinstance(rows, dict):
+            rows = [rows]
+        ids = [row["snapshotId"] for row in rows]
+        if not ids:
+            return []
+        rows = ec2.describe_snapshots(SnapshotIds=ids, OwnerIds=[event["recipientAccountId"]])["Snapshots"]
+        return [{"Id": row["SnapshotId"], "Tags": row.get("Tags", [])} for row in rows]
     if name in TARGET_FIELDS:
         def targets(value):
             if isinstance(value, dict):

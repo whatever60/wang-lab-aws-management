@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any, Dict
 
-from .models import COMPONENT, MANAGED_BY, ROLE_PATH, USER_TAG_KEYS
+from .models import COMPONENT, MANAGED_BY, ROLE_PATH
 from .runtime import CONFIG_ENV, HANDLER, IAM_EVENTS, validate_runtime_config
 from .native import NATIVE_EVENTS, CREATOR_TAG, OWNER_TAG
 from ..ec2_access.policy import PROTECTED_KINDS
@@ -46,10 +46,9 @@ def runtime_permissions(account_id: str, region: str, boundary_arn: str) -> Dict
     """
     role = "arn:aws:iam::%s:role%s*" % (account_id, ROLE_PATH)
     profile = "arn:aws:iam::%s:instance-profile%s*" % (account_id, ROLE_PATH)
-    templates = "arn:aws:ec2:%s:%s:launch-template/*" % (region, account_id)
     markers = {"aws:ResourceTag/ManagedBy": MANAGED_BY, "aws:ResourceTag/Component": COMPONENT}
     creation = {"aws:RequestTag/ManagedBy": MANAGED_BY, "aws:RequestTag/Component": COMPONENT}
-    managed_keys = ["ManagedBy", "Component", "Owner", "HomeBucket", "AccessRole", "Flavor"]
+    managed_keys = ["ManagedBy", "Component", "Owner", "HomeBucket", "AccessRole"]
     policies = ["arn:aws:iam::%s:policy/WangLabS3Access%s" % (account_id, name)
                 for name in ("ReadApproved", "CurrentMemberWriteOwn")]
     return {"Version": "2012-10-17", "Statement": [
@@ -81,13 +80,9 @@ def runtime_permissions(account_id: str, region: str, boundary_arn: str) -> Dict
          "Condition": {"StringEquals": creation, "ForAllValues:StringEquals": {"aws:TagKeys": managed_keys}}},
         {"Sid": "PassManagedDataRolesOnly", "Effect": "Allow", "Action": "iam:PassRole", "Resource": role,
          "Condition": {"StringEquals": {"iam:PassedToService": "ec2.amazonaws.com"}}},
-        {"Sid": "PublishOnlyTemplatePointers", "Effect": "Allow", "Action": ["iam:TagUser", "iam:UntagUser"],
-         "Resource": "arn:aws:iam::%s:user/*" % account_id,
-         "Condition": {"ForAllValues:StringEquals": {"aws:TagKeys": list(USER_TAG_KEYS)}}},
         {"Sid": "ReadHomeOwnershipOnly", "Effect": "Allow", "Action": "s3:GetBucketTagging", "Resource": "arn:aws:s3:::*",
          "Condition": {"StringEquals": {"s3:ResourceAccount": account_id}}},
-        {"Sid": "ReadComputeMetadata", "Effect": "Allow", "Action": ["ec2:DescribeKeyPairs", "ec2:DescribeLaunchTemplates",
-            "ec2:DescribeLaunchTemplateVersions", "ec2:DescribeInstances", "ec2:DescribeVolumes",
+        {"Sid": "ReadComputeMetadata", "Effect": "Allow", "Action": ["ec2:DescribeKeyPairs", "ec2:DescribeInstances", "ec2:DescribeVolumes",
             "ec2:DescribeNetworkInterfaces", "ec2:DescribeSnapshots", "ec2:DescribeImages", "ec2:DescribeSecurityGroups",
             "ec2:DescribeIamInstanceProfileAssociations", "ec2:DescribeTags"], "Resource": "*"},
         {"Sid": "ReadCreatorHistory", "Effect": "Allow", "Action": "cloudtrail:LookupEvents", "Resource": "*"},
@@ -98,14 +93,6 @@ def runtime_permissions(account_id: str, region: str, boundary_arn: str) -> Dict
         {"Sid": "AttachDataProfileToNewNativeInstance", "Effect": "Allow", "Action": "ec2:AssociateIamInstanceProfile",
          "Resource": "arn:aws:ec2:%s:%s:instance/*" % (region, account_id),
          "Condition": {"Null": {"ec2:ResourceTag/" + CREATOR_TAG: "false"}}},
-        {"Sid": "CreateManagedTemplates", "Effect": "Allow", "Action": "ec2:CreateLaunchTemplate", "Resource": templates,
-         "Condition": {"StringEquals": creation}},
-        {"Sid": "TagOnlyNewManagedTemplates", "Effect": "Allow", "Action": "ec2:CreateTags", "Resource": templates,
-         "Condition": {"StringEquals": {"ec2:CreateAction": "CreateLaunchTemplate", **creation},
-                       "ForAllValues:StringEquals": {"aws:TagKeys": managed_keys}}},
-        {"Sid": "MaintainManagedTemplates", "Effect": "Allow", "Action": ["ec2:CreateLaunchTemplateVersion",
-            "ec2:ModifyLaunchTemplate"], "Resource": templates,
-         "Condition": {"StringEquals": markers}},
         {"Sid": "NeverAssumeDelegatedRoles", "Effect": "Deny", "Action": ["sts:AssumeRole", "sts:AssumeRoleWithSAML", "sts:AssumeRoleWithWebIdentity"], "Resource": "*"},
     ]}
 

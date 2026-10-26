@@ -11,11 +11,9 @@ import re
 from typing import Any, Dict, Mapping, Optional
 from urllib.parse import unquote
 
-from aws_audit.ec2_access.launch import build_launch_request
-
-from .models import (COMPONENT, FLAVOR_TAG_KEYS, MANAGED_BY, ROLE_PATH, STATE_POLICY_NAME,
-                     USER_TAG_KEYS, MemberLaunchConfig, managed_tags, owned, profile_arn,
-                     role_arn, template_arn, template_name, valid_username, validate_config)
+from .models import (COMPONENT, MANAGED_BY, ROLE_PATH, STATE_POLICY_NAME,
+                     MemberAccessConfig, managed_tags, owned, profile_arn,
+                     role_arn, valid_username, validate_config)
 from .policies import attached_policy_arns, role_state, trust_policy
 
 
@@ -88,7 +86,7 @@ def _document(value: Any) -> dict:
     return value if isinstance(value, dict) else json.loads(unquote(value))
 
 
-def _group_members(iam: Any, config: MemberLaunchConfig) -> list:
+def _group_members(iam: Any, config: MemberAccessConfig) -> list:
     try:
         rows, arguments, seen = [], {"GroupName": config.member_group}, set()
         while True:
@@ -116,7 +114,7 @@ def _group_members(iam: Any, config: MemberLaunchConfig) -> list:
     return sorted(names)
 
 
-def _user(iam: Any, config: MemberLaunchConfig, username: str) -> dict:
+def _user(iam: Any, config: MemberAccessConfig, username: str) -> dict:
     try:
         response = iam.get_user(UserName=username)["User"]
         if not response.get("Arn", "").startswith("arn:aws:iam::" + config.account_id + ":user/"):
@@ -130,7 +128,7 @@ def _user(iam: Any, config: MemberLaunchConfig, username: str) -> dict:
         return {"exists": None, "tags": {}, "read_error": _diagnostic(exc)}
 
 
-def _role(iam: Any, config: MemberLaunchConfig, name: str) -> Optional[dict]:
+def _role(iam: Any, config: MemberAccessConfig, name: str) -> Optional[dict]:
     try:
         row = iam.get_role(RoleName=name)["Role"]
     except Exception as exc:
@@ -184,7 +182,7 @@ def _profile(iam: Any, name: str) -> Optional[dict]:
                 "tags": {}, "roles": [], "read_error": _diagnostic(exc)}
 
 
-def _bucket_tags(s3: Any, config: MemberLaunchConfig, home: str) -> Optional[dict]:
+def _bucket_tags(s3: Any, config: MemberAccessConfig, home: str) -> Optional[dict]:
     if s3 is None:
         return None
     try:
@@ -202,38 +200,9 @@ def _valid_home(home: Any) -> bool:
             and ".." not in home and not re.fullmatch(r"[0-9.]+", home))
 
 
-def _keys(ec2: Any) -> list:
-    rows = _items(ec2, "describe_key_pairs", "KeyPairs")
-    return sorted([{"name": row["KeyName"], "id": row["KeyPairId"], "tags": _tags(row.get("Tags", []))}
-                   for row in rows], key=lambda row: (row["name"], row["id"]))
-
-
-def _template(ec2: Any, row: dict) -> dict:
-    tags = _tags(row.get("Tags", []))
-    result = {"name": row["LaunchTemplateName"], "id": row["LaunchTemplateId"], "tags": tags,
-              "default_version": row["DefaultVersionNumber"], "latest_version": row["LatestVersionNumber"]}
-    if owned(tags):
-        versions = ec2.describe_launch_template_versions(LaunchTemplateId=result["id"], Versions=[str(result["default_version"])])["LaunchTemplateVersions"]
-        if len(versions) != 1:
-            raise RuntimeError("ambiguous managed launch-template version")
-        data = versions[0]["LaunchTemplateData"]
-        # Fingerprint unexpected fields without exposing legacy UserData or
-        # any other arbitrary template field in a preview or logs.
-        allowed = {"ImageId", "InstanceType", "KeyName", "NetworkInterfaces", "TagSpecifications",
-                   "IamInstanceProfile", "MetadataOptions"}
-        result["data"] = {key: data[key] for key in data if key in allowed}
-        extras = {key: data[key] for key in data if key not in allowed}
-        result["unexpected_fields"] = sorted(extras)
-        result["unexpected_fields_sha256"] = _digest(extras) if extras else None
-    return result
-
-
-def snapshot(iam: Any, ec2_by_region: Mapping[str, Any], config: MemberLaunchConfig, *, s3: Any = None) -> dict:
-    """Collect only IAM/EC2/S3-tag metadata. Failure never implies revocation."""
+def snapshot(iam: Any, config: MemberAccessConfig, *, s3: Any = None) -> dict:
+    """Collect only IAM and S3-tag metadata. Failure never implies revocation."""
     validate_config(config)
-    regions = sorted({flavor.region for flavor in config.flavors})
-    if set(regions) - set(ec2_by_region):
-        raise ValueError("an injected EC2 client is required for every flavor region")
     group = _group_members(iam, config)
     names = set(group) | {row["user_name"] for row in config.s3_manifest["users"]}
     role_names = names | {row["RoleName"] for row in _items(iam, "list_roles", "Roles", PathPrefix=ROLE_PATH)}
@@ -246,43 +215,11 @@ def snapshot(iam: Any, ec2_by_region: Mapping[str, Any], config: MemberLaunchCon
     homes = {user["tags"].get("HomeBucket") for user in users.values()}
     homes |= {row.get("home_bucket") for row in config.s3_manifest["users"]}
     buckets = {home: _bucket_tags(s3, config, home) for home in sorted(home for home in homes if _valid_home(home))}
-    templates, keys, key_errors, template_errors = {}, {}, {}, {}
-    for region in regions:
-        ec2 = ec2_by_region[region]
-        try:
-            keys[region] = _keys(ec2)
-        except Exception as exc:
-            keys[region], key_errors[region] = [], _diagnostic(exc)
-        try:
-            rows = {row["LaunchTemplateName"]: row for row in _items(ec2, "describe_launch_templates", "LaunchTemplates",
-                    Filters=[{"Name": "tag:ManagedBy", "Values": [MANAGED_BY]}])}
-        except Exception as exc:
-            # EC2 read failure cannot prevent already-known IAM offboarding.
-            templates[region], template_errors[region] = {}, _diagnostic(exc)
-            continue
-        for username in sorted(names):
-            for flavor in config.flavors:
-                name = template_name(username, flavor.name)
-                if flavor.region != region or name in rows:
-                    continue
-                try:
-                    for row in _items(ec2, "describe_launch_templates", "LaunchTemplates", LaunchTemplateNames=[name]):
-                        rows[row["LaunchTemplateName"]] = row
-                except Exception as exc:
-                    if not _missing(exc):
-                        rows[name] = {"read_error": _diagnostic(exc)}
-        templates[region] = {}
-        for name, row in sorted(rows.items()):
-            try:
-                templates[region][name] = row if "read_error" in row else _template(ec2, row)
-            except Exception as exc:
-                templates[region][name] = {"read_error": _diagnostic(exc)}
     return {"account_id": config.account_id, "group_members": group, "users": users, "bucket_tags": buckets,
-            "roles": roles, "profiles": profiles, "keys": keys, "templates": templates,
-            "key_read_errors": key_errors, "template_read_errors": template_errors}
+            "roles": roles, "profiles": profiles}
 
 
-def _identity_problem(config: MemberLaunchConfig, observed: dict, username: str) -> Optional[str]:
+def _identity_problem(config: MemberAccessConfig, observed: dict, username: str) -> Optional[str]:
     if username not in observed["group_members"]:
         return "not in authoritative lab_members group"
     user = observed["users"].get(username, {})
@@ -312,7 +249,7 @@ def _identity_problem(config: MemberLaunchConfig, observed: dict, username: str)
     return None
 
 
-def _resource_problem(config: MemberLaunchConfig, observed: dict, username: str, home: str) -> Optional[str]:
+def _resource_problem(config: MemberAccessConfig, observed: dict, username: str, home: str) -> Optional[str]:
     for kind, rows, arn in (("role", observed["roles"], role_arn(config, username)),
                             ("profile", observed["profiles"], profile_arn(config, username))):
         item = rows.get(username)
@@ -330,31 +267,10 @@ def _resource_problem(config: MemberLaunchConfig, observed: dict, username: str,
         if kind == "role" and (set(item["inline_names"]) - {STATE_POLICY_NAME}
                                 or set(item["attached"]) - set(attached_policy_arns(config.account_id))):
             return "managed role contains unapproved policies; administrator review required"
-    for flavor in config.flavors:
-        item = observed["templates"][flavor.region].get(template_name(username, flavor.name))
-        if item and item.get("read_error"):
-            return "launch-template metadata could not be verified"
-        if item and (not owned(item["tags"]) or any(item["tags"].get(key) != value for key, value in
-                {"Owner": username, "HomeBucket": home, "Flavor": flavor.name}.items())):
-            return "foreign or mismatched launch-template collision; administrator review required"
     return None
 
 
-def _template_data(config: MemberLaunchConfig, username: str, flavor: Any, key_name: Optional[str]) -> dict:
-    data = build_launch_request(config.ec2_config, username=username, key_name=key_name or "pending_key",
-                                instance_type=flavor.instance_type, region=flavor.region, image_id=flavor.image_id,
-                                subnet_id=flavor.subnet_id, security_group_id=flavor.security_group_id,
-                                name=username + " " + flavor.name)
-    data.pop("MinCount")
-    data.pop("MaxCount")
-    if key_name is None:
-        data.pop("KeyName")
-    data["IamInstanceProfile"] = {"Arn": profile_arn(config, username)}
-    data["MetadataOptions"] = {"HttpEndpoint": "enabled", "HttpTokens": "required"}
-    return data
-
-
-def plan(config: MemberLaunchConfig, observed: dict) -> dict:
+def plan(config: MemberAccessConfig, observed: dict) -> dict:
     """Build a deterministic, JSON-safe preview. No clients or AWS calls needed."""
     validate_config(config)
     if observed.get("account_id") != config.account_id:
@@ -371,48 +287,18 @@ def plan(config: MemberLaunchConfig, observed: dict) -> dict:
         home = row.get("home_bucket", "")
         if problem is None:
             problem = _resource_problem(config, observed, username, home)
-        if problem is None and any(flavor.region in observed.get("key_read_errors", {})
-                                   or flavor.region in observed.get("template_read_errors", {}) for flavor in config.flavors):
-            problem = "EC2 launch-region metadata could not be verified"
         if problem:
             blocked[username] = problem
             continue
-        selected, key_problems = {}, []
-        for region in sorted({flavor.region for flavor in config.flavors}):
-            candidates = [key for key in observed["keys"][region] if key["tags"].get("Owner") == username]
-            if not candidates:
-                selected[region] = None
-                key_problems.append(region + ": missing Owner-tagged key")
-            else:
-                owned_names = {key["name"] for key in candidates}
-                prior = {(observed["templates"][region].get(template_name(username, flavor.name)) or {}).get("data", {}).get("KeyName")
-                         for flavor in config.flavors if flavor.region == region}
-                # Keep a consistent existing personal default when it is still
-                # verified. Additional owned keys remain selectable in EC2.
-                selected[region] = next(iter(prior)) if len(prior) == 1 and prior <= owned_names else sorted(owned_names)[0]
-        item = {"username": username, "home_bucket": home, "active": not key_problems,
-                "status": "pending_key" if key_problems else "active", "key_problems": key_problems,
-                "role_arn": role_arn(config, username), "profile_arn": profile_arn(config, username),
-                "templates": []}
-        try:
-            for flavor in config.flavors:
-                item["templates"].append({"name": template_name(username, flavor.name), "flavor": flavor.name,
-                    "region": flavor.region, "user_tag_key": FLAVOR_TAG_KEYS[flavor.name],
-                    "tags": {**managed_tags(username, home), "Flavor": flavor.name},
-                    "data": _template_data(config, username, flavor, selected[flavor.region])})
-        except ValueError as exc:
-            blocked[username] = str(exc)
-            continue
+        item = {"username": username, "home_bucket": home, "active": True, "status": "active",
+                "role_arn": role_arn(config, username), "profile_arn": profile_arn(config, username)}
         desired[username] = item
     # Revocations are a separate first phase, including deleted users and
-    # metadata/key failures. Foreign, unmarked resources are never modified.
+    # metadata failures. Foreign, unmarked resources are never modified.
     revoke_names = {name for name, role in observed["roles"].items()
                     if _manageable_role(config, name, role) and (name not in desired or not desired[name]["active"])}
-    revoke_names |= {name for name in observed["users"] if name not in desired or not desired[name]["active"]}
     for name in sorted(revoke_names):
-        user, role = observed["users"].get(name), observed["roles"].get(name)
-        if user and (user.get("read_error") or user["exists"] and any(key in user["tags"] for key in USER_TAG_KEYS)):
-            operations.append({"phase": "revoke", "kind": "untag_user", "username": name})
+        role = observed["roles"].get(name)
         if _manageable_role(config, name, role) and (not _same(role.get("state"), role_state(False))
                 or not _same(role.get("trust"), trust_policy(False)) or role["tags"].get("AccessRole") != "Inactive"):
             operations.append({"phase": "revoke", "kind": "disable_role", "username": name})
@@ -421,42 +307,34 @@ def plan(config: MemberLaunchConfig, observed: dict) -> dict:
         role_ok = (role is not None and set(role["attached"]) == set(attached_policy_arns(config.account_id))
                    and (config.permissions_boundary_arn is None or role.get("boundary") == config.permissions_boundary_arn))
         profile_ok = profile is not None and profile["roles"] == [name]
-        templates_ok = all(_same((observed["templates"][template["region"]].get(template["name"]) or {}).get("data"), template["data"])
-                           and not (observed["templates"][template["region"]].get(template["name"]) or {}).get("unexpected_fields")
-                           for template in item["templates"])
-        if not role_ok or not profile_ok or not templates_ok:
+        if not role_ok or not profile_ok:
             operations.append({"phase": "provision", "kind": "ensure_resources", "username": name})
         if item["active"]:
-            expected_tags = {template["user_tag_key"]: template_arn(config, template["region"], observed["templates"][template["region"]][template["name"]]["id"])
-                             for template in item["templates"] if template["name"] in observed["templates"][template["region"]]}
             state_ok = role is not None and _same(role.get("state"), role_state(True, item["home_bucket"])) and _same(role.get("trust"), trust_policy(True))
-            tags_ok = (len(expected_tags) == (len(USER_TAG_KEYS) if config.flavors else 0)
-                       and all(observed["users"][name]["tags"].get(key) == value for key, value in expected_tags.items()))
             access_tag_ok = role is not None and role["tags"].get("AccessRole") == "CurrentMember"
-            if not state_ok or not tags_ok or not access_tag_ok or not role_ok or not profile_ok or not templates_ok:
+            if not state_ok or not access_tag_ok or not role_ok or not profile_ok:
                 operations.append({"phase": "activate", "kind": "activate_member", "username": name})
     result = {"schema_version": 1, "snapshot_sha256": _digest(observed), "desired": desired,
               "blocked": blocked, "operations": operations,
               "resource_read_errors": resource_errors,
               "counts": {"active": sum(item["active"] for item in desired.values()),
-                         "pending_key": sum(not item["active"] for item in desired.values()),
                          "blocked": len(blocked), "operations": len(operations)}}
     result["plan_sha256"] = _digest(result)
     return result
 
 
-def _manageable_role(config: MemberLaunchConfig, name: str, role: Optional[dict]) -> bool:
+def _manageable_role(config: MemberAccessConfig, name: str, role: Optional[dict]) -> bool:
     return bool(role and owned(role["tags"]) and role["path"] == ROLE_PATH and role["arn"] == role_arn(config, name))
 
 
-def _guard_role(iam: Any, config: MemberLaunchConfig, username: str) -> dict:
+def _guard_role(iam: Any, config: MemberAccessConfig, username: str) -> dict:
     role = _role(iam, config, username)
     if not _manageable_role(config, username, role):
         raise RuntimeError("refusing to mutate a missing or foreign role: " + username)
     return role
 
 
-def _disable(iam: Any, config: MemberLaunchConfig, username: str) -> None:
+def _disable(iam: Any, config: MemberAccessConfig, username: str) -> None:
     role = _guard_role(iam, config, username)
     if not _same(role.get("state"), role_state(False)):
         iam.put_role_policy(RoleName=username, PolicyName=STATE_POLICY_NAME, PolicyDocument=_json(role_state(False)))
@@ -466,41 +344,17 @@ def _disable(iam: Any, config: MemberLaunchConfig, username: str) -> None:
         iam.tag_role(RoleName=username, Tags=_tag_rows({"AccessRole": "Inactive"}))
 
 
-def _untag_user(iam: Any, username: str) -> None:
-    try:
-        try:
-            tags = _tags(_items(iam, "list_user_tags", "Tags", UserName=username))
-            keys = [key for key in USER_TAG_KEYS if key in tags]
-        except Exception as exc:
-            if _missing(exc):
-                return
-            # These four administrator-only names belong to this tool. A read
-            # failure must not leave stale launch grants or prevent revoking a
-            # different member; removing an absent tag is harmless.
-            keys = list(USER_TAG_KEYS)
-        if keys:
-            iam.untag_user(UserName=username, TagKeys=keys)
-    except Exception as exc:
-        if not _missing(exc):
-            raise
-
-
-def _identity_guard(iam: Any, ec2_by_region: Mapping[str, Any], s3: Any,
-                    config: MemberLaunchConfig, item: dict) -> None:
+def _identity_guard(iam: Any, s3: Any,
+                    config: MemberAccessConfig, item: dict) -> None:
     name, home = item["username"], item["home_bucket"]
     observed = {"group_members": _group_members(iam, config), "users": {name: _user(iam, config, name)},
                 "bucket_tags": {home: _bucket_tags(s3, config, home)}}
     problem = _identity_problem(config, observed, name)
     if problem:
         raise RuntimeError("member identity changed before grant: " + name + ": " + problem)
-    for region in {template["region"] for template in item["templates"]}:
-        keys = [key for key in _keys(ec2_by_region[region]) if key["tags"].get("Owner") == name]
-        expected = {template["data"].get("KeyName") for template in item["templates"] if template["region"] == region}
-        if not keys or not expected or not expected <= {key["name"] for key in keys}:
-            raise RuntimeError("verified personal key changed before grant: " + name)
 
 
-def _ensure_resources(iam: Any, ec2_by_region: Mapping[str, Any], config: MemberLaunchConfig, item: dict) -> None:
+def _ensure_resources(iam: Any, config: MemberAccessConfig, item: dict) -> None:
     name, home = item["username"], item["home_bucket"]
     role = _role(iam, config, name)
     if role is None:
@@ -531,38 +385,11 @@ def _ensure_resources(iam: Any, ec2_by_region: Mapping[str, Any], config: Member
         raise RuntimeError("refusing foreign or mismatched instance profile")
     if name not in profile["roles"]:
         iam.add_role_to_instance_profile(InstanceProfileName=name, RoleName=name)
-    for template in item["templates"]:
-        ec2 = ec2_by_region[template["region"]]
-        try:
-            rows = ec2.describe_launch_templates(LaunchTemplateNames=[template["name"]])["LaunchTemplates"]
-        except Exception as exc:
-            if not _missing(exc):
-                raise
-            rows = []
-        if not rows:
-            ec2.create_launch_template(LaunchTemplateName=template["name"],
-                ClientToken=_digest({"name": template["name"], "data": template["data"]}),
-                VersionDescription="wanglab-member-managed", LaunchTemplateData=template["data"],
-                TagSpecifications=[{"ResourceType": "launch-template", "Tags": _tag_rows(template["tags"])}])
-        else:
-            if len(rows) != 1:
-                raise RuntimeError("ambiguous launch template")
-            current = _template(ec2, rows[0])
-            if not owned(current["tags"]) or any(current["tags"].get(key) != value for key, value in
-                    {"Owner": name, "HomeBucket": home, "Flavor": template["flavor"]}.items()):
-                raise RuntimeError("refusing foreign or mismatched launch template")
-            if not _same(current["data"], template["data"]) or current["unexpected_fields"]:
-                # No SourceVersion: do not inherit arbitrary prior UserData,
-                # block devices, IAM settings, or other unreviewed fields.
-                version = ec2.create_launch_template_version(LaunchTemplateId=current["id"],
-                    ClientToken=_digest({"id": current["id"], "data": template["data"]}),
-                    VersionDescription="wanglab-member-managed", LaunchTemplateData=template["data"])["LaunchTemplateVersion"]["VersionNumber"]
-                ec2.modify_launch_template(LaunchTemplateId=current["id"], DefaultVersion=str(version))
 
 
-def _activate(iam: Any, ec2_by_region: Mapping[str, Any], s3: Any, config: MemberLaunchConfig, item: dict) -> None:
+def _activate(iam: Any, s3: Any, config: MemberAccessConfig, item: dict) -> None:
     name, home = item["username"], item["home_bucket"]
-    _identity_guard(iam, ec2_by_region, s3, config, item)
+    _identity_guard(iam, s3, config, item)
     role, profile = _guard_role(iam, config, name), _profile(iam, name)
     if (role["tags"].get("Owner") != name or role["tags"].get("HomeBucket") != home
             or set(role["attached"]) != set(attached_policy_arns(config.account_id))
@@ -571,19 +398,7 @@ def _activate(iam: Any, ec2_by_region: Mapping[str, Any], s3: Any, config: Membe
             or not profile or profile["arn"] != profile_arn(config, name) or not owned(profile["tags"])
             or profile["tags"].get("Owner") != name or profile["tags"].get("HomeBucket") != home or profile["roles"] != [name]):
         raise RuntimeError("role/profile is not ready for activation")
-    user_tags = {}
-    for template in item["templates"]:
-        ec2 = ec2_by_region[template["region"]]
-        rows = ec2.describe_launch_templates(LaunchTemplateNames=[template["name"]])["LaunchTemplates"]
-        if len(rows) != 1:
-            raise RuntimeError("all four templates must exist before activation")
-        current = _template(ec2, rows[0])
-        if (not owned(current["tags"]) or any(current["tags"].get(key) != value for key, value in
-                {"Owner": name, "HomeBucket": home, "Flavor": template["flavor"]}.items())
-                or not _same(current["data"], template["data"]) or current["unexpected_fields"]):
-            raise RuntimeError("all four templates must match the reviewed request before activation")
-        user_tags[template["user_tag_key"]] = template_arn(config, template["region"], current["id"])
-    _identity_guard(iam, ec2_by_region, s3, config, item)
+    _identity_guard(iam, s3, config, item)
     if role["tags"].get("AccessRole") != "CurrentMember":
         iam.tag_role(RoleName=name, Tags=_tag_rows({"AccessRole": "CurrentMember"}))
     if profile["tags"].get("AccessRole") != "CurrentMember":
@@ -592,36 +407,29 @@ def _activate(iam: Any, ec2_by_region: Mapping[str, Any], s3: Any, config: Membe
         iam.put_role_policy(RoleName=name, PolicyName=STATE_POLICY_NAME, PolicyDocument=_json(role_state(True, home)))
     if not _same(role.get("trust"), trust_policy(True)):
         iam.update_assume_role_policy(RoleName=name, PolicyDocument=_json(trust_policy(True)))
-    live_tags = _user(iam, config, name)["tags"]
-    if any(live_tags.get(key) != value for key, value in user_tags.items()):
-        iam.tag_user(UserName=name, Tags=_tag_rows(user_tags))
-    # A concurrent offboard must not leave a freshly published entry point.
-    _identity_guard(iam, ec2_by_region, s3, config, item)
+    _identity_guard(iam, s3, config, item)
 
 
-def apply_plan(iam: Any, ec2_by_region: Mapping[str, Any], config: MemberLaunchConfig,
+def apply_plan(iam: Any, config: MemberAccessConfig,
                approved_plan: dict, *, s3: Any = None) -> dict:
     """Reject stale/tampered previews; revoke globally before any grants.
 
     AWS IAM changes are eventually consistent, so callers retry failures rather
     than treating partial provisioning as success. A grant failure removes this
-    member's launch tags and denies its managed role, then continues with other
+    member's managed role, then continues with other
     members. Global membership/discovery failures abort before mutation; an
     unreadable personal identity/home blocks only that member.
     """
-    fresh = plan(config, snapshot(iam, ec2_by_region, config, s3=s3))
+    fresh = plan(config, snapshot(iam, config, s3=s3))
     if fresh != approved_plan:
-        raise RuntimeError("member launch plan is stale or modified; preview again")
+        raise RuntimeError("member access plan is stale or modified; preview again")
     applied, errors = [], dict(fresh["resource_read_errors"])
     for operation in fresh["operations"]:
         if operation["phase"] != "revoke":
             continue
         name = operation["username"]
         try:
-            if operation["kind"] == "untag_user":
-                _untag_user(iam, name)
-            else:
-                _disable(iam, config, name)
+            _disable(iam, config, name)
             applied.append(operation)
         except Exception as exc:
             errors[name] = _diagnostic(exc)
@@ -636,32 +444,31 @@ def apply_plan(iam: Any, ec2_by_region: Mapping[str, Any], config: MemberLaunchC
             continue
         try:
             if item["active"]:
-                _identity_guard(iam, ec2_by_region, s3, config, item)
+                _identity_guard(iam, s3, config, item)
             for operation in operations:
                 if operation["kind"] == "ensure_resources":
-                    _ensure_resources(iam, ec2_by_region, config, item)
+                    _ensure_resources(iam, config, item)
                 else:
-                    _activate(iam, ec2_by_region, s3, config, item)
+                    _activate(iam, s3, config, item)
                 applied.append(operation)
         except Exception as exc:
-            # No unrelated member is revoked for one user's bad key, collision,
+            # No unrelated member is revoked for one user's collision,
             # API failure, or concurrent identity change.
             errors[name] = _diagnostic(exc)
-            _untag_user(iam, name)
             role = _role(iam, config, name)
             if _manageable_role(config, name, role):
                 _disable(iam, config, name)
     return {"plan": fresh, "applied": applied, "errors": errors, "counts": fresh["counts"]}
 
 
-def reconcile(iam: Any, ec2_by_region: Mapping[str, Any], config: MemberLaunchConfig, *,
+def reconcile(iam: Any, config: MemberAccessConfig, *,
               s3: Any = None, execute: bool = False) -> dict:
     """Preview by default; runtime can execute a freshly captured guarded plan."""
-    preview = plan(config, snapshot(iam, ec2_by_region, config, s3=s3))
+    preview = plan(config, snapshot(iam, config, s3=s3))
     if not execute:
         return preview
     if not preview["operations"]:
         # There is nothing to authorize or mutate. The runtime still rechecks
         # membership after this pass; a second full resource scan buys nothing.
         return {"plan": preview, "applied": [], "errors": preview["resource_read_errors"], "counts": preview["counts"]}
-    return apply_plan(iam, ec2_by_region, config, preview, s3=s3)
+    return apply_plan(iam, config, preview, s3=s3)

@@ -1,6 +1,6 @@
 # AWS Audit
 
-Lab AWS access, personal EC2 launches, inventory and cost reports, audit alerts,
+Lab AWS access, personal EC2 launches, inventory and cost reports, quiet audit records,
 and optional ParallelCluster/Slurm test tooling.
 
 Members use the ordinary AWS console, CLI and SDK. EC2 is allowed by default;

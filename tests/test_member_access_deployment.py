@@ -7,19 +7,8 @@ from aws_audit.member_access.deployment import cloudformation_template, data_bou
 
 def approved():
     account = "111122223333"
-    prefix = "arn:aws:ec2:us-east-1:"
-    ec2 = {"account_id": account, "regions": ["us-east-1"], "instance_types": ["t3.micro"],
-           "approved_image_arns": [prefix + ":image/ami-111"],
-           "approved_snapshot_arns": [prefix + ":snapshot/snap-111"],
-           "approved_subnet_arns": [prefix + account + ":subnet/subnet-111"],
-           "approved_security_group_arns": [prefix + account + ":security-group/sg-111"],
-           "member_launch": {"role_path": "/wanglab/member-s3/", "instance_profile_path": "/wanglab/member-s3/",
-                             "template_tag_keys": ["MemberLaunchUbuntu2404", "MemberLaunchAl2023", "MemberLaunchDL2204", "MemberLaunchDL2404"], "require_template": True}}
-    return {"ec2_config": ec2, "member_group": "lab_members",
-            "permissions_boundary_arn": "arn:aws:iam::" + account + ":policy/WangLabMemberS3Boundary",
-            "flavors": [{"name": name, "region": "us-east-1", "image_id": "ami-111", "instance_type": "t3.micro",
-                         "subnet_id": "subnet-111", "security_group_id": "sg-111"}
-                        for name in ["Ubuntu2404", "Al2023", "DL2204", "DL2404"]]}
+    return {"ec2_config": {"account_id": account, "regions": ["us-east-1"]},
+            "permissions_boundary_arn": "arn:aws:iam::" + account + ":policy/WangLabMemberS3Boundary"}
 
 
 class DeploymentTest(unittest.TestCase):
@@ -39,8 +28,9 @@ class DeploymentTest(unittest.TestCase):
         create = next(s for s in allows if s["Sid"] == "CreateBoundedRoles")
         self.assertEqual(create["Condition"]["StringEquals"]["iam:PermissionsBoundary"], config["permissions_boundary_arn"])
         self.assertTrue(create["Resource"].endswith(":role/wanglab/member-s3/*"))
-        pointers = next(s for s in allows if s["Sid"] == "PublishOnlyTemplatePointers")
-        self.assertEqual(set(pointers["Condition"]["ForAllValues:StringEquals"]["aws:TagKeys"]), set(config["ec2_config"]["member_launch"]["template_tag_keys"]))
+        self.assertNotIn("iam:TagUser", actions)
+        self.assertNotIn("iam:UntagUser", actions)
+        self.assertFalse(any(a.startswith("ec2:CreateLaunchTemplate") or a == "ec2:ModifyLaunchTemplate" for a in actions))
 
     def test_instance_role_ceiling_does_not_grant_administration(self):
         doc = data_boundary("111122223333")
@@ -70,7 +60,10 @@ class DeploymentTest(unittest.TestCase):
 
     def test_oversized_configuration_is_rejected_before_deployment(self):
         config = copy.deepcopy(approved())
-        config["ec2_config"]["instance_types"] += ["t3.type" + str(n) for n in range(500)]
+        config["ec2_config"]["shared_grants"] = [
+            {"resource_arn": "arn:aws:ec2:us-east-1:111122223333:instance/i-%017x" % n,
+             "principal_arns": ["arn:aws:iam::111122223333:user/Member"], "actions": ["ec2:StartInstances"],
+             "expires_at": "2027-01-01T00:00:00Z", "reason": "x" * 200} for n in range(30)]
         with self.assertRaisesRegex(ValueError, "4 KB"):
             cloudformation_template(config, artifact_bucket="example-artifacts", artifact_key="member-access/releases/reviewed.zip")
 

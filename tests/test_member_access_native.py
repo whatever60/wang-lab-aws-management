@@ -115,6 +115,29 @@ class NativeAttributionTest(unittest.TestCase):
         self.assertEqual(_resources(ec2, event, SINCE), [{"Id": "subnet-new", "Tags": tags({"Name": "native-subnet"})}])
         ec2.describe_tags.assert_called_once_with(Filters=[{"Name": "resource-id", "Values": ["subnet-new"]}])
 
+    def test_multi_volume_snapshots_are_attributed_from_response_not_source_ids(self):
+        from unittest.mock import Mock
+        ec2 = Mock()
+        ec2.describe_snapshots.return_value = {"Snapshots": [
+            {"SnapshotId": "snap-new-a", "Tags": tags({"Name": "backup"})}, {"SnapshotId": "snap-new-b"}]}
+        event = {"eventName": "CreateSnapshots", "recipientAccountId": ACCOUNT,
+                 "responseElements": {"CreateSnapshotsResponse": {"snapshotSet": {"item": [
+                     {"snapshotId": "snap-new-a", "volumeId": "vol-source-a"},
+                     {"snapshotId": "snap-new-b", "volumeId": "vol-source-b"}]}}}}
+        self.assertEqual(_resources(ec2, event, SINCE), [
+            {"Id": "snap-new-a", "Tags": tags({"Name": "backup"})}, {"Id": "snap-new-b", "Tags": []}])
+        ec2.describe_snapshots.assert_called_once_with(SnapshotIds=["snap-new-a", "snap-new-b"], OwnerIds=[ACCOUNT])
+
+    def test_single_volume_create_snapshots_uses_cloudtrail_xml_object_shape(self):
+        from unittest.mock import Mock
+        ec2 = Mock()
+        ec2.describe_snapshots.return_value = {"Snapshots": [{"SnapshotId": "snap-only"}]}
+        event = {"eventName": "CreateSnapshots", "recipientAccountId": ACCOUNT,
+                 "responseElements": {"CreateSnapshotsResponse": {"snapshotSet": {
+                     "item": {"snapshotId": "snap-only", "volumeId": "vol-source"}}}}}
+        self.assertEqual(_resources(ec2, event, SINCE), [{"Id": "snap-only", "Tags": []}])
+        ec2.describe_snapshots.assert_called_once_with(SnapshotIds=["snap-only"], OwnerIds=[ACCOUNT])
+
     def test_event_hint_still_reads_the_actual_audit_record(self):
         from unittest.mock import Mock
         history = Mock()

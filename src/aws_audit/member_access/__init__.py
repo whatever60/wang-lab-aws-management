@@ -1,7 +1,6 @@
-"""Reviewed member S3 roles and personal EC2 launch-template reconciliation."""
+"""Guarded personal S3 roles for native EC2 workflows."""
 
-from .models import FLAVOR_TAG_KEYS, LaunchFlavor, MemberLaunchConfig, config_from_mapping
+from .models import MemberAccessConfig, config_from_mapping
 from .reconcile import apply_plan, plan, reconcile, snapshot
 
-__all__ = ["FLAVOR_TAG_KEYS", "LaunchFlavor", "MemberLaunchConfig", "config_from_mapping",
-           "snapshot", "plan", "apply_plan", "reconcile"]
+__all__ = ["MemberAccessConfig", "config_from_mapping", "snapshot", "plan", "apply_plan", "reconcile"]

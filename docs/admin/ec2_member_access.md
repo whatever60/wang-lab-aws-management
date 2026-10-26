@@ -9,7 +9,8 @@ previous mandatory-template policy bundle on `lab_members`.
 EC2 is allowed by default. The policy does not maintain a list of permitted
 EC2 operations. Explicit guardrails prevent changing known foreign resources,
 damaging shared infrastructure, selecting another person's data role, changing
-account defaults, and buying prepaid commitments. A new native EC2 feature does
+account-wide network/security defaults, and allocating Dedicated Hosts or
+Capacity Reservations and buying prepaid commitments. A new native EC2 feature does
 not require a policy change merely because it was absent from a whitelist.
 
 Native `RunInstances` does not require launch templates, IAM template-pointer
@@ -67,9 +68,8 @@ The normal policy configuration needs only the account and allowed regions:
 ```
 
 Optional `shared_grants` retain exact existing-instance exceptions with a
-principal list, allowed Start/Stop/Reboot actions, UTC expiry and reason. Legacy
-source/flavor inputs are accepted for optional existing templates, and do not
-constrain native creation. Live account configuration belongs in ignored files.
+principal list, allowed Start/Stop/Reboot actions, UTC expiry and reason.
+Live account configuration belongs in ignored files.
 
 ```bash
 PYTHONPATH=src python -m aws_audit.ec2_access config/member_access.local.json

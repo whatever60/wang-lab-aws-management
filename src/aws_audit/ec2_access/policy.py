@@ -9,7 +9,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Sequence, Tuple
 
 
 SELF = "${aws:username}"
@@ -47,26 +47,10 @@ class SharedGrant:
 
 
 @dataclass(frozen=True)
-class MemberLaunchConfig:
-    """Admin-controlled principal tags select templates without policy rewrites."""
-
-    role_path: str
-    instance_profile_path: str
-    template_tag_keys: Tuple[str, ...]
-    require_template: bool = True
-
-
-@dataclass(frozen=True)
 class MemberEc2Config:
     account_id: str
     regions: Tuple[str, ...]
-    instance_types: Tuple[str, ...] = field(default_factory=tuple)
-    approved_image_arns: Tuple[str, ...] = field(default_factory=tuple)
-    approved_snapshot_arns: Tuple[str, ...] = field(default_factory=tuple)
-    approved_subnet_arns: Tuple[str, ...] = field(default_factory=tuple)
-    approved_security_group_arns: Tuple[str, ...] = field(default_factory=tuple)
     shared_grants: Tuple[SharedGrant, ...] = field(default_factory=tuple)
-    member_launch: Optional[MemberLaunchConfig] = None
 
 
 def policy_size(document: Mapping[str, Any]) -> int:
@@ -76,19 +60,14 @@ def policy_size(document: Mapping[str, Any]) -> int:
 
 def config_from_mapping(value: Mapping[str, Any]) -> MemberEc2Config:
     """Read an explicit JSON configuration; reject omissions and unknown fields."""
-    optional = {"shared_grants", "member_launch", "instance_types", "approved_image_arns", "approved_snapshot_arns",
-                "approved_subnet_arns", "approved_security_group_arns"}
-    fields = {"account_id", "regions", "instance_types", "approved_image_arns", "approved_snapshot_arns",
-              "approved_subnet_arns", "approved_security_group_arns"} | optional
+    optional = {"shared_grants"}
+    fields = {"account_id", "regions"} | optional
     if not isinstance(value, dict) or set(value) - fields or fields - optional - set(value):
         raise ValueError("configuration contains unknown fields or missing required fields")
-    kwargs = {"account_id": value["account_id"]}
-    for key in ("regions", "instance_types", "approved_image_arns", "approved_snapshot_arns",
-                "approved_subnet_arns", "approved_security_group_arns"):
-        items = value.get(key, [])
-        if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
-            raise ValueError(key + " must be an array of strings")
-        kwargs[key] = tuple(items)
+    regions = value["regions"]
+    if not isinstance(regions, list) or any(not isinstance(item, str) for item in regions):
+        raise ValueError("regions must be an array of strings")
+    kwargs = {"account_id": value["account_id"], "regions": tuple(regions)}
     grants = value.get("shared_grants", [])
     if not isinstance(grants, list):
         raise ValueError("shared_grants must be an array")
@@ -105,16 +84,6 @@ def config_from_mapping(value: Mapping[str, Any]) -> MemberEc2Config:
         normalized.append(SharedGrant(grant["resource_arn"], tuple(grant["principal_arns"]),
                                       tuple(grant["actions"]), grant["expires_at"], grant["reason"]))
     kwargs["shared_grants"] = tuple(normalized)
-    member_launch = value.get("member_launch")
-    if member_launch is not None:
-        expected = {"role_path", "instance_profile_path", "template_tag_keys", "require_template"}
-        if not isinstance(member_launch, dict) or set(member_launch) != expected:
-            raise ValueError("member_launch requires exact explicit role/profile paths, template_tag_keys, and require_template")
-        keys = member_launch["template_tag_keys"]
-        if not isinstance(keys, list) or any(not isinstance(item, str) for item in keys):
-            raise ValueError("template_tag_keys must be an array of strings")
-        kwargs["member_launch"] = MemberLaunchConfig(member_launch["role_path"], member_launch["instance_profile_path"],
-                                                    tuple(keys), member_launch["require_template"])
     result = MemberEc2Config(**kwargs)
     _validate(result)
     return result
@@ -123,21 +92,10 @@ def config_from_mapping(value: Mapping[str, Any]) -> MemberEc2Config:
 def _validate(config: MemberEc2Config) -> None:
     if not isinstance(config.account_id, str) or not re.fullmatch(r"[0-9]{12}", config.account_id):
         raise ValueError("account_id must be an exact twelve-digit AWS account")
-    for label, values in (("regions", config.regions), ("instance_types", config.instance_types)):
-        if (label == "regions" and not values) or len(set(values)) != len(values):
-            raise ValueError(label + " must be unique; regions must be nonempty")
+    if not config.regions or len(set(config.regions)) != len(config.regions):
+        raise ValueError("regions must be nonempty and unique")
     if any(not re.fullmatch(r"[a-z]{2}(?:-[a-z]+)+-\d", region) for region in config.regions):
         raise ValueError("regions must be exact region names")
-    if any(not re.fullmatch(r"[a-z0-9-]+\.[a-z0-9]+", item) for item in config.instance_types):
-        raise ValueError("instance_types must be exact types, without wildcards")
-    for kind, values in (("image", config.approved_image_arns),
-                         ("snapshot", config.approved_snapshot_arns),
-                         ("subnet", config.approved_subnet_arns),
-                         ("security-group", config.approved_security_group_arns)):
-        if len(set(values)) != len(values):
-            raise ValueError("approved " + kind + " ARNs must be unique")
-        for arn in values:
-            _validate_arn(config, arn, kind)
     seen = set()
     for grant in config.shared_grants:
         _validate_arn(config, grant.resource_arn, "instance")
@@ -161,17 +119,6 @@ def _validate(config: MemberEc2Config) -> None:
         # the explicit expiration Deny. IAM evaluates expiry at request time.
         if expiry.year < 2020:
             raise ValueError("shared expiry is outside the supported range")
-    if config.member_launch is not None:
-        launch = config.member_launch
-        if not isinstance(launch, MemberLaunchConfig) or not isinstance(launch.require_template, bool):
-            raise ValueError("member_launch must be a MemberLaunchConfig with boolean require_template")
-        for path in (launch.role_path, launch.instance_profile_path):
-            if not isinstance(path, str) or not re.fullmatch(r"/(?:[A-Za-z0-9_+=,.@-]+/)+", path):
-                raise ValueError("member launch IAM paths must be exact non-root paths ending in slash")
-        if not 1 <= len(launch.template_tag_keys) <= 4 or len(set(launch.template_tag_keys)) != len(launch.template_tag_keys):
-            raise ValueError("member launch requires one to four unique template tag keys")
-        if any(not isinstance(key, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,63}", key) for key in launch.template_tag_keys):
-            raise ValueError("member template tag keys must be exact alphanumeric IAM tag names")
 
 
 def _validate_arn(config: MemberEc2Config, arn: str, kind: str) -> None:
@@ -257,17 +204,18 @@ def build_policy_bundle(config: MemberEc2Config, *, max_policy_size: int = 6144)
     # Private provenance keys do not reserve ordinary Owner/Project/custom tags.
     add("ProtectAttribution", "Deny", ["ec2:CreateTags", "ec2:DeleteTags"],
         condition={"ForAnyValue:StringEqualsIgnoreCase": {"aws:TagKeys": ["wanglab:Owner", "wanglab:CreatorUserId"]}})
-    add("ForeignTags", "Deny", ["ec2:CreateTags", "ec2:DeleteTags"], condition=foreign)
     add("SnapshotAccount", "Deny", ["ec2:DeleteSnapshot", "ec2:ModifySnapshotAttribute"],
         condition={"StringNotEquals": {"ec2:Owner": config.account_id}})
     add("PerVolumeLimit", "Deny", ["ec2:RunInstances", "ec2:CreateVolume", "ec2:ModifyVolume"],
         condition={"NumericGreaterThan": {"ec2:VolumeSize": "1024"}})
     # These change account-wide defaults or create prepaid commitments. They
     # are administrative decisions, unrelated to ordinary instance creation.
-    add("AccountAndCommitments", "Deny", ["ec2:ModifyDefaultCreditSpecification", "ec2:DisableEbsEncryptionByDefault",
+    add("AccountAndCommitments", "Deny", ["ec2:ModifyDefaultCreditSpecification",
+        "ec2:EnableEbsEncryptionByDefault", "ec2:DisableEbsEncryptionByDefault",
         "ec2:ModifyEbsDefaultKmsKeyId", "ec2:ResetEbsDefaultKmsKeyId", "ec2:DisableImageBlockPublicAccess",
-        "ec2:DisableSnapshotBlockPublicAccess", "ec2:PurchaseReservedInstancesOffering",
-        "ec2:PurchaseHostReservation", "ec2:PurchaseCapacityBlock", "ec2:AcceptReservedInstancesExchangeQuote"])
+        "ec2:EnableImageBlockPublicAccess", "ec2:EnableSnapshotBlockPublicAccess", "ec2:DisableSnapshotBlockPublicAccess",
+        "ec2:ModifyVpcBlockPublicAccessOptions", "ec2:AllocateHosts", "ec2:CreateCapacityReservation*",
+        "ec2:Purchase*", "ec2:AcceptReservedInstancesExchangeQuote", "ec2:AcceptCapacityReservationBillingOwnership"])
     # Account identity and data-role administration can bypass ownership guards.
     # Unrelated services are neither granted nor blanket-denied by this policy.
     add("ProtectIdentityAndDataRoles", "Deny", ["iam:TagUser", "iam:UntagUser", "sts:AssumeRole", "sts:TagSession",

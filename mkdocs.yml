@@ -35,7 +35,7 @@ nav:
       - Member Launch Automation: admin/member_launch_automation.md
       - ParallelCluster HPC: admin/parallelcluster_hpc.md
       - HPC User Lifecycle: admin/hpc_user_lifecycle.md
-      - Audit Alert Setup: admin/audit_setup.md
+      - Audit Recording Setup: admin/audit_setup.md
       - S3 Access: admin/s3_access.md
   - Developer Notes:
       - Architecture: developer/architecture.md

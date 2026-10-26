@@ -6,7 +6,7 @@ This documentation covers local tooling for:
 - EC2 compute cost allocation
 - native EC2 console/CLI creation with background ownership and personal S3 roles
 - S3 access reconciliation
-- audit alert setup
+- audit recording setup
 - AWS ParallelCluster and Slurm workflows
 
 The docs are intended for three audiences:

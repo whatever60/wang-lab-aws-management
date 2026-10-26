@@ -22,7 +22,8 @@ personal home writes. The role has no EC2 management or IAM authority.
 ## Native Creation
 
 The controller reads successful CloudTrail `RunInstances`, `CreateVolume`,
-`CreateKeyPair`, `ImportKeyPair`, `CreateSecurityGroup`, `CreateSnapshot` and
+`CreateKeyPair`, `ImportKeyPair`, `CreateSecurityGroup`, `CreateSnapshot`,
+`CreateSnapshots` and
 `CreateImage` records, plus native network, address, template and image/snapshot
 copy creation. The deployment's `native_since` timestamp separates new
 resources from historical infrastructure. Replays require matching account,
@@ -68,22 +69,20 @@ Keep live values in ignored `config/member_access.local.json`:
 ```
 
 No AMI/type/subnet/SG registry, flavor list or IAM template-pointer tags are
-required. The old optional template configuration remains readable for
-compatibility, but native deployments do not provision or maintain templates.
+required. The retired per-member template generator, wrapper and pointer tags
+have been removed. Members may still use their own native AWS launch templates.
 
 ## Offboarding and Failure Handling
 
 Removing a member, invalidating home ownership or losing required identity
-metadata revokes the managed personal role. The controller removes legacy
-pointers where relevant, sets role state to an explicit Deny-all and denies new
-role assumptions. Existing issued role credentials lose authority after IAM
+metadata revokes the managed personal role. The controller sets role state to
+an explicit Deny-all and denies new role assumptions. Existing issued role credentials lose authority after IAM
 propagation. EC2 instances/data and Linux/SSH access are preserved and need
 separate lifecycle decisions.
 
 Reserved concurrency one serializes automatic and administrative sync. Native
 Lambda retries, CloudWatch logs and the existing error alarm surface failures.
-The schedule repairs missed events. Slack audit notifications remain independent
-and are not enabled by this controller. Failed reconciliation is not success.
+The schedule repairs missed events. Failed reconciliation is not success.
 
 ```bash
 aws-audit member-access plan --config config/member_access.local.json
