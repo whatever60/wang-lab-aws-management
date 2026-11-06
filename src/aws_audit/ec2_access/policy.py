@@ -22,7 +22,7 @@ SOURCE_USE = {
     "snapshot": ("RunInstances", "CreateVolume", "CopySnapshot"),
     "security-group": ("RunInstances", "CreateNetworkInterface", "CreateVpcEndpoint"),
     "subnet": ("RunInstances", "CreateNetworkInterface", "CreateNatGateway", "CreateVpcEndpoint"),
-    "vpc": ("RunInstances", "CreateSecurityGroup", "CreateSubnet", "CreateRouteTable",
+    "vpc": ("GetSecurityGroupsForVpc", "RunInstances", "CreateSecurityGroup", "CreateSubnet", "CreateRouteTable",
             "CreateNetworkAcl", "CreateVpcEndpoint", "CreateVpcPeeringConnection"),
     "launch-template": ("RunInstances", "CreateFleet"),
 }

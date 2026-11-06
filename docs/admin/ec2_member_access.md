@@ -87,6 +87,9 @@ Use real member credentials for native console-equivalent and CLI requests:
 normal AMI/type/key, Name-only or no tags, no template and no profile. Creation
 DryRuns must return `DryRunOperation`. Check new keys/groups, native custom tags,
 foreign-resource/profile denial, region restrictions and the EBS size boundary.
+The console also calls `GetSecurityGroupsForVpc` against the shared/default VPC;
+this read must succeed without granting permission to modify that VPC. A minimal
+RunInstances DryRun alone does not exercise the console's networking controls.
 
 A disposable real native instance must acquire verified creator tags and its
 personal S3 role through the deployed controller, then use its instance

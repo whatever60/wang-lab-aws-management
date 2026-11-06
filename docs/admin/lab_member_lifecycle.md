@@ -52,15 +52,18 @@ assigned through this workflow. Member self-service EC2 creation remains native.
    manifest. Verify the bounded personal S3 role/profile; no template pointers
    or personally tagged SSH key are prerequisites for native EC2 creation.
 9. Verify CLI identity, own-bucket read/write, approved reads, foreign write
-   denial, console reset and SSH key presence. Use the member identity for a
-   normal RunInstances DryRun with no template, special tags or profile.
+   denial, console reset and SSH key presence. Check the console's
+   `GetSecurityGroupsForVpc` read against the shared/default VPC. Use the member
+   identity for a normal RunInstances DryRun with no template, special tags or profile.
 10. When HPC is deployed, synchronize its managed roster using the
     [HPC lifecycle workflow](parallelcluster_hpc.md). EC2 keys alone do not
     install Linux SSH authorization.
 11. Deliver credentials and the private key only to the confirmed recipient via
     the explicitly authorized channel. Members use normal EC2 **Launch
-    instance** and standard CLI/SDK calls in `us-east-1`. Record delivery
-    metadata without secrets.
+    instance** and standard CLI/SDK calls in `us-east-1`. Include
+    `?region=us-east-1` in the account's standard console sign-in URL and label it
+    **US East (N. Virginia)**. Ohio is `us-east-2`, where compute creation is
+    blocked. Record delivery metadata without secrets.
 
 [Native EC2 usage](../user/ec2_launch.md) needs no special launch procedure.
 Ownership and personal S3 profile attachment run in the background for new

@@ -272,6 +272,17 @@ class NativeMemberEc2PolicyTest(unittest.TestCase):
         for action in ("iam:TagUser", "iam:PutRolePolicy", "sts:AssumeRole"):
             self.check("explicitDeny", action, context={}, broad=True)
 
+    def test_console_can_list_security_groups_for_a_shared_vpc_without_mutating_it(self):
+        vpc = BASE + "vpc/vpc-111"
+        foreign = owned(**{"ec2:ResourceTag/wanglab:Owner": "administrator-managed/unattributed"})
+        self.check("allowed", "ec2:GetSecurityGroupsForVpc", vpc, foreign)
+        for action in ("ec2:ModifyVpcAttribute", "ec2:DeleteVpc", "ec2:CreateTags"):
+            self.check("explicitDeny", action, vpc, foreign, broad=True)
+        self.check("explicitDeny", "ec2:GetSecurityGroupsForVpc",
+                   vpc.replace(REGION, "us-east-2"), {**foreign, "ec2:Region": "us-east-2"}, broad=True)
+        # The VPC-listing exception does not expose another member's console output.
+        self.check("explicitDeny", "ec2:GetConsoleOutput", INSTANCE, foreign, broad=True)
+
     def test_missing_identity_cannot_use_broad_ec2_grants(self):
         context = member_context()
         del context["aws:username"]

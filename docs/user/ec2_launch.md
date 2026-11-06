@@ -5,6 +5,11 @@ standard AWS CLI/SDK calls. Choose your image, instance type, SSH key, networkin
 and storage as usual. **Launch instance works directly.** A personal launch
 template, special tag set, or repository command is not required.
 
+[Open the EC2 console in N. Virginia](https://us-east-1.console.aws.amazon.com/ec2/home?region=us-east-1).
+**Ohio is `us-east-2`**, where new compute resources are blocked by the account's
+single-region policy. Reading a permitted S3 bucket in Ohio does not require
+launching your instance there.
+
 The account permits normal key-pair and security-group creation from the launch
 wizard. Existing shared network infrastructure remains administrator-managed.
 EC2 operations on your own resources are allowed by default; guardrails protect
