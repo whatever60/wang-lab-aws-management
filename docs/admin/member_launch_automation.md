@@ -16,8 +16,10 @@ ownership before grants; offboarding revocations run before new grants.
 
 Roles and profiles remain under `/wanglab/member-s3/`, named after the exact
 IAM username, and carry protected `ManagedBy` / `Component` / ownership markers.
-Role policies and the managed S3 boundary restrict approved lab reads and
-personal home writes. The role has no EC2 management or IAM authority.
+Role policies and the managed S3 boundary restrict access to approved lab reads,
+personal home writes and explicitly enabled shared uploads. The stack renderer
+reads shared upload targets from the local S3 manifest (`--s3-manifest`).
+The role has no EC2 management or IAM authority.
 
 ## Native Creation
 

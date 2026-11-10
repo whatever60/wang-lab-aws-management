@@ -7,6 +7,7 @@ from typing import Optional, Sequence
 
 from .deployment import FUNCTION_NAME, cloudformation_template
 from .runtime import build_runtime_package, live_member_manifest, validate_runtime_config
+from ..s3_access.reconcile import load_manifest, member_upload_buckets, validate_manifest_structure
 
 
 def sync(function_name: str = FUNCTION_NAME) -> dict:
@@ -38,6 +39,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     stack_parser.add_argument("--config", type=Path, default=Path("config/member_access.local.json"))
     stack_parser.add_argument("--artifact-bucket", required=True)
     stack_parser.add_argument("--artifact-key", required=True)
+    stack_parser.add_argument("--s3-manifest", type=Path,
+                              help="Override config/s3_access_manifest.local.json for shared upload buckets")
     args = parser.parse_args(argv)
     if args.command == "sync":
         result = sync(args.function_name)
@@ -50,7 +53,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     else:
         value = json.loads(args.config.read_text())
         if args.command == "render-stack":
-            result = cloudformation_template(value, artifact_bucket=args.artifact_bucket, artifact_key=args.artifact_key)
+            upload_buckets = ()
+            manifest_path = args.s3_manifest or Path("config/s3_access_manifest.local.json")
+            if args.s3_manifest or manifest_path.exists():
+                manifest = load_manifest(manifest_path)
+                validate_manifest_structure(manifest)
+                if manifest["account_id"] != value["ec2_config"]["account_id"]:
+                    parser.error("S3 manifest and member-access config must refer to the same AWS account")
+                upload_buckets = tuple(member_upload_buckets(manifest))
+            result = cloudformation_template(value, artifact_bucket=args.artifact_bucket,
+                                             artifact_key=args.artifact_key, upload_buckets=upload_buckets)
         else:
             import boto3
             from .models import config_from_mapping

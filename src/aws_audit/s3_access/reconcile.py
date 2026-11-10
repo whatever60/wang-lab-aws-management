@@ -5,7 +5,7 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 MANAGED_TAG_KEYS = {"AccessRole", "HomeBucket", "BucketScope", "BucketOwner"}
@@ -19,6 +19,11 @@ OBJECT_WRITE_ACTIONS = [
     "s3:PutObject",
     "s3:PutObjectTagging",
     "s3:PutObjectVersionTagging",
+]
+OBJECT_UPLOAD_ACTIONS = [
+    "s3:AbortMultipartUpload",
+    "s3:ListMultipartUploadParts",
+    "s3:PutObject",
 ]
 BUCKET_LIST_ACTIONS = [
     "s3:ListBucket",
@@ -141,6 +146,14 @@ def buckets_by_scope(manifest: dict[str, Any], scopes: set[str]) -> list[str]:
     )
 
 
+def member_upload_buckets(manifest: dict[str, Any]) -> list[str]:
+    """Return shared buckets that explicitly accept member uploads."""
+    return sorted(
+        bucket["name"] for bucket in manifest["buckets"]
+        if bucket["scope"] == "SharedOps" and bucket.get("member_upload") is True
+    )
+
+
 def arn_for_bucket(bucket: str) -> str:
     """Return the bucket ARN for an S3 bucket."""
     return f"arn:aws:s3:::{bucket}"
@@ -213,6 +226,10 @@ def validate_manifest_structure(manifest: dict[str, Any]) -> None:
     for bucket in manifest["buckets"]:
         if bucket.get("scope") not in ("User", "SharedOps", "ServiceManaged"):
             raise RuntimeError(f"Bucket {bucket['name']} has invalid scope {bucket.get('scope')!r}.")
+        if "member_upload" in bucket and (
+            bucket["scope"] != "SharedOps" or not isinstance(bucket["member_upload"], bool)
+        ):
+            raise RuntimeError(f"Bucket {bucket['name']} needs a boolean member_upload on a SharedOps bucket.")
         if bucket["scope"] == "User":
             owner = bucket.get("owner")
             if not isinstance(owner, str) or owner not in users:
@@ -371,9 +388,9 @@ def read_policy(manifest: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def member_write_policy() -> dict[str, Any]:
-    """Own-home writes; only administrators may provision new S3 buckets."""
-    return {
+def member_write_policy(manifest: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """Own-home writes and approved uploads; only admins can provision buckets."""
+    policy = {
         "Version": "2012-10-17",
         "Statement": [
             {
@@ -394,6 +411,16 @@ def member_write_policy() -> dict[str, Any]:
             },
         ],
     }
+    uploads = member_upload_buckets(manifest) if manifest is not None else []
+    if uploads:
+        policy["Statement"].append({
+            "Sid": "UploadToApprovedSharedBuckets",
+            "Effect": "Allow",
+            "Action": OBJECT_UPLOAD_ACTIONS,
+            "Resource": [arn_for_objects(bucket) for bucket in uploads],
+            "Condition": {"StringEquals": {"aws:PrincipalTag/AccessRole": "CurrentMember"}},
+        })
+    return policy
 
 
 def admin_policy(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -658,6 +685,7 @@ def guardrail_sids() -> set[str]:
         "WangLabDenyWriteUnlessHomeBucketMatches",
         "WangLabDenyWriteUnlessCurrentMemberOrAdmin",
         "WangLabDenyWriteUnlessAdmin",
+        "WangLabDenyUploadUnlessCurrentMemberOrAdmin",
         "AwsAuditDenyWriteUnlessHomeBucketMatches",
         "AwsAuditDenyWriteUnlessCurrentMemberOrAdmin",
         "AwsAuditDenyWriteUnlessAdmin",
@@ -690,9 +718,9 @@ def user_bucket_guardrails(bucket_name: str) -> list[dict[str, Any]]:
     ]
 
 
-def admin_only_guardrails(bucket_name: str) -> list[dict[str, Any]]:
-    """Build bucket policy guardrails for admin-write-only buckets."""
-    return [
+def admin_only_guardrails(bucket_name: str, *, member_upload: bool = False) -> list[dict[str, Any]]:
+    """Keep shared bucket writes admin-only except explicitly approved uploads."""
+    statements = [
         {
             "Sid": "WangLabDenyWriteUnlessAdmin",
             "Effect": "Deny",
@@ -702,6 +730,19 @@ def admin_only_guardrails(bucket_name: str) -> list[dict[str, Any]]:
             "Condition": {"StringNotEquals": {"aws:PrincipalTag/AccessRole": "Admin"}},
         }
     ]
+    if member_upload:
+        statements[0]["Action"] = [
+            action for action in OBJECT_WRITE_ACTIONS if action not in OBJECT_UPLOAD_ACTIONS
+        ]
+        statements.append({
+            "Sid": "WangLabDenyUploadUnlessCurrentMemberOrAdmin",
+            "Effect": "Deny",
+            "Principal": "*",
+            "Action": OBJECT_UPLOAD_ACTIONS,
+            "Resource": arn_for_objects(bucket_name),
+            "Condition": {"StringNotEquals": {"aws:PrincipalTag/AccessRole": ["CurrentMember", "Admin"]}},
+        })
+    return statements
 
 
 def desired_bucket_policy(bucket: dict[str, Any]) -> dict[str, Any]:
@@ -716,7 +757,7 @@ def desired_bucket_policy(bucket: dict[str, Any]) -> dict[str, Any]:
     if bucket["scope"] == "User":
         managed = user_bucket_guardrails(bucket_name)
     elif bucket["scope"] == "SharedOps":
-        managed = admin_only_guardrails(bucket_name)
+        managed = admin_only_guardrails(bucket_name, member_upload=bucket.get("member_upload", False))
     else:
         managed = []
     return {"Version": policy.get("Version", "2012-10-17"), "Statement": kept + managed}
@@ -762,7 +803,7 @@ def reconcile_managed_policies(manifest: dict[str, Any], apply: bool) -> tuple[l
     actions.extend(put_policy_document(read_arn, READ_POLICY_NAME, read_policy(manifest), apply))
     actions.extend(
         put_policy_document(
-            member_write_arn, MEMBER_WRITE_POLICY_NAME, member_write_policy(), apply
+            member_write_arn, MEMBER_WRITE_POLICY_NAME, member_write_policy(manifest), apply
         )
     )
     actions.extend(put_policy_document(admin_arn, ADMIN_POLICY_NAME, admin_policy(manifest), apply))

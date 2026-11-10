@@ -8,13 +8,14 @@ from .models import COMPONENT, MANAGED_BY, ROLE_PATH
 from .runtime import CONFIG_ENV, HANDLER, IAM_EVENTS, validate_runtime_config
 from .native import NATIVE_EVENTS, CREATOR_TAG, OWNER_TAG
 from ..ec2_access.policy import PROTECTED_KINDS
+from ..s3_access.reconcile import OBJECT_UPLOAD_ACTIONS, arn_for_objects
 
 
 BOUNDARY_NAME = "WangLabMemberS3Boundary"
 FUNCTION_NAME = "wanglab-member-access-sync"
 
 
-def data_boundary(account_id: str) -> Dict[str, Any]:
+def data_boundary(account_id: str, *, upload_buckets: tuple[str, ...] = ()) -> Dict[str, Any]:
     """Cap managed instance roles to account-local S3 data access only.
 
     This is a ceiling, not a grant. Approved-bucket identity policies and the
@@ -22,7 +23,7 @@ def data_boundary(account_id: str) -> Dict[str, Any]:
     Bucket-policy/ACL/administrative and non-S3 powers are outside the ceiling.
     """
     local = {"StringEquals": {"s3:ResourceAccount": account_id}}
-    return {"Version": "2012-10-17", "Statement": [
+    policy = {"Version": "2012-10-17", "Statement": [
         {"Sid": "ListAccountBucketNames", "Effect": "Allow", "Action": "s3:ListAllMyBuckets", "Resource": "*"},
         {"Sid": "ReadAccountBucketData", "Effect": "Allow", "Action": [
             "s3:GetBucketLocation", "s3:ListBucket", "s3:ListBucketVersions", "s3:ListBucketMultipartUploads",
@@ -36,6 +37,18 @@ def data_boundary(account_id: str) -> Dict[str, Any]:
             "s3:PutObjectVersionTagging"], "Resource": "arn:aws:s3:::${aws:PrincipalTag/HomeBucket}/*", "Condition": local},
         {"Sid": "IdentifyOwnSession", "Effect": "Allow", "Action": "sts:GetCallerIdentity", "Resource": "*"},
     ]}
+    if upload_buckets:
+        policy["Statement"].append({
+            "Sid": "UploadToApprovedSharedBuckets",
+            "Effect": "Allow",
+            "Action": OBJECT_UPLOAD_ACTIONS,
+            "Resource": [arn_for_objects(bucket) for bucket in upload_buckets],
+            "Condition": {"StringEquals": {
+                "s3:ResourceAccount": account_id,
+                "aws:PrincipalTag/AccessRole": "CurrentMember",
+            }},
+        })
+    return policy
 
 
 def runtime_permissions(account_id: str, region: str, boundary_arn: str) -> Dict[str, Any]:
@@ -97,7 +110,8 @@ def runtime_permissions(account_id: str, region: str, boundary_arn: str) -> Dict
     ]}
 
 
-def cloudformation_template(config: dict, *, artifact_bucket: str, artifact_key: str) -> Dict[str, Any]:
+def cloudformation_template(config: dict, *, artifact_bucket: str, artifact_key: str,
+                            upload_buckets: tuple[str, ...] = ()) -> Dict[str, Any]:
     """Render an isolated, reviewable stack using already-uploaded source code."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]", artifact_bucket):
         raise ValueError("artifact_bucket must be an exact S3 bucket name")
@@ -119,7 +133,7 @@ def cloudformation_template(config: dict, *, artifact_bucket: str, artifact_key:
          "Resource": {"Fn::GetAtt": ["Logs", "Arn"]}},
     ])
     resources: Dict[str, Any] = {
-        "Boundary": {"Type": "AWS::IAM::ManagedPolicy", "DeletionPolicy": "Retain", "UpdateReplacePolicy": "Retain", "Properties": {"ManagedPolicyName": BOUNDARY_NAME, "PolicyDocument": data_boundary(account)}},
+        "Boundary": {"Type": "AWS::IAM::ManagedPolicy", "DeletionPolicy": "Retain", "UpdateReplacePolicy": "Retain", "Properties": {"ManagedPolicyName": BOUNDARY_NAME, "PolicyDocument": data_boundary(account, upload_buckets=upload_buckets)}},
         "Logs": {"Type": "AWS::Logs::LogGroup", "Properties": {"LogGroupName": "/aws/lambda/" + FUNCTION_NAME, "RetentionInDays": 30, "Tags": tags}},
         "RuntimeRole": {"Type": "AWS::IAM::Role", "Properties": {"RoleName": "WangLabMemberAccessSync", "Tags": tags,
             "AssumeRolePolicyDocument": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"}, "Action": "sts:AssumeRole"}]},

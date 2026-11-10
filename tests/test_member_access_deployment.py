@@ -43,6 +43,20 @@ class DeploymentTest(unittest.TestCase):
         self.assertEqual(own["Resource"], "arn:aws:s3:::${aws:PrincipalTag/HomeBucket}/*")
         self.assertEqual(own["Condition"]["StringEquals"]["s3:ResourceAccount"], "111122223333")
 
+    def test_shared_upload_ceiling_is_scoped_to_approved_objects(self):
+        base = data_boundary("111122223333")
+        approved_upload = data_boundary("111122223333", upload_buckets=("example-uploads",))
+        self.assertEqual(approved_upload["Statement"][:-1], base["Statement"])
+        grant = approved_upload["Statement"][-1]
+        self.assertEqual(grant["Resource"], ["arn:aws:s3:::example-uploads/*"])
+        self.assertEqual(set(grant["Action"]), {
+            "s3:PutObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts",
+        })
+        self.assertEqual(grant["Condition"]["StringEquals"], {
+            "s3:ResourceAccount": "111122223333",
+            "aws:PrincipalTag/AccessRole": "CurrentMember",
+        })
+
     def test_stack_uses_one_rule_for_events_and_periodic_repair(self):
         stack = cloudformation_template(approved(), artifact_bucket="example-artifacts", artifact_key="member-access/releases/reviewed.zip")
         resources = stack["Resources"]

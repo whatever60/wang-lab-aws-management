@@ -82,7 +82,10 @@ and optionally a `BucketOwner`.
 Typical scopes:
 
 - `User`: a user's own bucket.
-- `SharedOps`: shared operational data, writable by admins only.
+- `SharedOps`: shared operational data, writable by admins by default. Set
+  `"member_upload": true` on an individual bucket in the local manifest to let
+  current members upload and manage multipart uploads there. Deletion and object
+  tagging stay admin-only. S3 uploads can replace an existing object at the same key.
 - `ServiceManaged`: service or application buckets with their existing
   access policies; administrators receive reads, while member-wide reads and the
   `SharedOps` admin-write guardrail are not added.
@@ -91,6 +94,10 @@ Choose by the bucket's actual use and access policy, not by whether its name
 contains a person's name. An application bucket already used by an instance role
 can use `ServiceManaged` without creating another role or changing that bucket
 policy. The reconciler preserves service-managed policies.
+
+When changing the approved upload buckets, also render and update the member-access
+stack with the same local S3 manifest so EC2 instance roles receive the same
+bucket-scoped upload permissions.
 
 The reconciler is intentionally explicit: ambiguous users or buckets should be fixed in
 the manifest instead of guessed.

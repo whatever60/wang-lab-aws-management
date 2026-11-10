@@ -70,6 +70,27 @@ class S3AccessReconcileTest(unittest.TestCase):
         self.assertEqual(admin_sids, ["WangLabDenyWriteUnlessAdmin"])
         self.assertIn("AwsAuditDenyWriteUnlessHomeBucketMatches", reconcile.guardrail_sids())
 
+    def test_shared_upload_is_scoped_to_current_members_and_approved_buckets(self) -> None:
+        self.manifest["buckets"][2]["member_upload"] = True
+        reconcile.validate_manifest_structure(self.manifest)
+        identity = reconcile.member_write_policy(self.manifest)
+        statement = {"Statement": reconcile.admin_only_guardrails("ops", member_upload=True)}
+        policies = {"identity": identity, "bucket": statement}
+        obj = "arn:aws:s3:::ops/submission.fastq.gz"
+        member = {"aws:PrincipalTag/AccessRole": "CurrentMember"}
+        for action in reconcile.OBJECT_UPLOAD_ACTIONS:
+            self.assertEqual(decision(policies, action, obj, member), "allowed")
+            self.assertEqual(decision(policies, action, obj, {}, competing_allow=True), "explicitDeny")
+            self.assertEqual(decision(policies, action, "arn:aws:s3:::service/other", member), "implicitDeny")
+        self.assertEqual(decision(policies, "s3:DeleteObject", obj, member, competing_allow=True), "explicitDeny")
+
+    def test_shared_upload_flag_requires_a_boolean_on_shared_ops(self) -> None:
+        for index, flag in ((0, True), (2, "true"), (3, True)):
+            manifest = deepcopy(self.manifest)
+            manifest["buckets"][index]["member_upload"] = flag
+            with self.assertRaisesRegex(RuntimeError, "member_upload"):
+                reconcile.validate_manifest_structure(manifest)
+
     def test_alumni_describe_exception_preserves_s3_and_service_scope(self) -> None:
         """The deny excludes exactly approved describes and applies only to direct EC2."""
         before = deepcopy(self.manifest)
